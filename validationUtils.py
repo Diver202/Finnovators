@@ -132,7 +132,7 @@ async def performDiscrepancyChecks(data):
 
         if discrepancy > tolerance:
             findings.append(st.error)
-            findings.append(f"Total Amount Mismatch (High Fraud Risk): Line Items (₹{calculatedSubtotal:.2f}) + Total Taxes (₹{totalTTaxes:.2f}) = ₹{calculatedGrandTotal:.2f}. This does not match the Grand Total (₹{totalAmount:.2f}). Discrepancy: ₹{discrepancy:.2f}")
+            findings.append(f"Total Amount Mismatch (High Fraud Risk): Line Items (₹{calculatedSubtotal:.2f}) + Total Taxes (₹{totalTaxes:.2f}) = ₹{calculatedGrandTotal:.2f}. This does not match the Grand Total (₹{totalAmount:.2f}). Discrepancy: ₹{discrepancy:.2f}")
         else:
             findings.append(st.success)
             findings.append(f"Grand Total Verified: Line Items (₹{calculatedSubtotal:.2f}) + Taxes (₹{totalTaxes:.2f}) = ₹{calculatedGrandTotal:.2f}, which matches the Grand Total.")
