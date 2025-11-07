@@ -4,6 +4,7 @@ import asyncio
 # Import all the functions from our new, separated utility files
 from aiUtils import parseInvoiceMultimodal
 from validationUtils import performDiscrepancyChecks
+from saveJaison import saveJaisonToFile
 
 
 # --- Streamlit App UI (Must be async) ---
@@ -34,6 +35,8 @@ async def main():
             with st.spinner(f"Analyzing {uploadedFile.name}... (Step 1: AI Vision)"):
                 parsedData = await parseInvoiceMultimodal(fileBytes, fileType)
             
+            if parsedData:
+                saveJaisonToFile(parsedData, uploadedFile.name)
             st.json(parsedData)
             
         with col2:
