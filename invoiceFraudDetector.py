@@ -2,11 +2,7 @@ import streamlit as st
 import asyncio
 
 # Import all the functions from our new, separated utility files
-from ocrUtils import (
-    extractTextFromPdf,
-    extractTextFromImage
-)
-from aiUtils import parseInvoiceText
+from aiUtils import parseInvoiceMultimodal
 from validationUtils import performDiscrepancyChecks
 
 
@@ -23,41 +19,37 @@ async def main():
         fileBytes = uploadedFile.getvalue()
         fileType = uploadedFile.type
         
-        rawText = ""
+        # Display the image if it's an image file
+        if fileType.startswith("image/"):
+            st.image(fileBytes, caption="Uploaded Image", use_column_width=True)
+
+        st.divider()
+        col1, col2 = st.columns(2)
         
-        with st.spinner(f"Processing {uploadedFile.name}... (Step 1: OCR)"):
-            if fileType == "application/pdf":
-                rawText = extractTextFromPdf(fileBytes)
-            elif fileType.startswith("image/"):
-                st.image(fileBytes, caption="Uploaded Image", use_column_width=True)
-                rawText = extractTextFromImage(fileBytes)
-
-        if rawText:
-            st.divider()
-            col1, col2 = st.columns(2)
+        parsedData = {}
+        
+        with col1:
+            st.subheader("Extracted Data (from AI)")
+            # This is now the main processing step
+            with st.spinner(f"Analyzing {uploadedFile.name}... (Step 1: AI Vision)"):
+                parsedData = await parseInvoiceMultimodal(fileBytes, fileType)
             
-            with col1:
-                st.subheader("Extracted Data (from AI)")
-                # This is now an async call, so we use 'await'
-                with st.spinner("Calling AI model to parse text... (Step 2: AI Parsing)"):
-                    parsedData = await parseInvoiceText(rawText)
-                
-                st.json(parsedData)
-                
-                with st.expander("Show Raw Extracted Text"):
-                    st.text_area("Raw Text", rawText, height=300)
-
-            with col2:
-                st.subheader("Validation & Discrepancy Report (Step 3: Validation)")
-                findings = performDiscrepancyChecks(parsedData, rawText)
+            st.json(parsedData)
+            
+        with col2:
+            st.subheader("Validation & Discrepancy Report (Step 2: Validation)")
+            # Check if parsedData is not empty
+            if parsedData:
+                # This now only passes 'parsedData' as rawText no longer exists
+                findings = performDiscrepancyChecks(parsedData)
                 
                 for i in range(0, len(findings), 2):
                     messageTypeFunc = findings[i]
                     message = findings[i+1]
                     messageTypeFunc(message) 
-        else:
-            st.error("Could not extract any text from the uploaded file.")
+            else:
+                st.error("Could not extract any data from the uploaded file.")
 
 if __name__ == "__main__":
-    # This is the standard way to run an async main function in Streamlit
+    # This is the standard way to run an async main function
     asyncio.run(main())

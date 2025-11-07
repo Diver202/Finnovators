@@ -3,12 +3,16 @@ import asyncio
 import httpx
 import json
 import re
-
+import base64
+import fitz  # PyMuPDF
+import io
+from PIL import Image
 
 async def fetchFromGemini(payload):
     """
     Handles the asynchronous API call to Gemini with exponential backoff.
     """
+    # --- I have preserved your API key ---
     apiKey = "AIzaSyAdnKDhhSEmycIQXO7u6AA1CPlcESElJh0"
     apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={apiKey}"
     
@@ -39,24 +43,66 @@ async def fetchFromGemini(payload):
                 st.error(f"Raw response: {result}")
                 return "{}" # Return empty JSON on parse failure
 
-async def parseInvoiceText(text):
+def convertFileToImageBytes(fileBytes, fileType):
     """
-    Calls the Gemini API to parse the invoice text
-    using a structured JSON schema.
+    Converts the uploaded file (PDF or Image) into PNG image bytes.
+    Processes ONLY the first page of a PDF.
+    """
+    if fileType == "application/pdf":
+        try:
+            with fitz.open(stream=fileBytes, filetype="pdf") as doc:
+                page = doc.load_page(0)  # Load only the first page
+                pix = page.get_pixmap(dpi=300)
+                imgBytes = pix.tobytes("png")
+                return imgBytes, "image/png"
+        except Exception as e:
+            st.error(f"Error processing PDF with PyMuPDF: {e}")
+            return None, None
+            
+    elif fileType.startswith("image/"):
+        try:
+            # Convert to PNG to ensure consistency
+            with io.BytesIO(fileBytes) as f:
+                img = Image.open(f)
+                with io.BytesIO() as output:
+                    img.save(output, format="PNG")
+                    return output.getvalue(), "image/png"
+        except Exception as e:
+            st.error(f"Error processing image with PIL: {e}")
+            return None, None
+            
+    return None, None
+
+async def parseInvoiceMultimodal(fileBytes, fileType):
+    """
+    Calls the Gemini API to parse the invoice *image*
+    using a multimodal prompt and a structured JSON schema.
     """
     
+    # Convert PDF or Image to a single PNG byte stream
+    imageBytes, imageMimeType = convertFileToImageBytes(fileBytes, fileType)
+    
+    if not imageBytes:
+        st.error("Could not convert file to a processable image.")
+        return {}
+
+    # 1. Base64-encode the image
+    imageBase64 = base64.b64encode(imageBytes).decode('utf-8')
+
+    # 2. Update the system prompt to reflect we are looking at an image
     systemPrompt = """
     You are an expert AI assistant for processing Indian tax invoices.
-    Your task is to extract specific fields from the raw, messy OCR text provided.
-    - Reconstruct the 64-character IRN even if it is split across multiple lines or contains spaces.
+    You are looking at an *image* of an invoice.
+    Your task is to extract specific fields from the image.
+    - Reconstruct the 64-character IRN. It might be split across lines.
     - Find the 15-digit GSTIN (e.g., 27ABCDE1234F1Z5).
     - Find all unique HSN or SAC codes (they are 4, 6, or 8 digits).
     - Find the final total amount (e.g., 'Grand Total' or 'Amount Due').
-    - Return ONLY the JSON object as specified in the schema. Do not return any other text.
+    - Return ONLY the JSON object as specified in the schema.
     If a value is not found, return null for that field.
 
     Additional tasks - 
-    An irn code only has a-b (lowercase) and 0-9. If you recieve the following characters, convert them to their respective replacements.
+    An irn code only has a-f (lowercase) and 0-9. If you recieve the following characters, convert them to their respective replacements.
     "B" - 8
     "E" - 3
     "I" - 1
@@ -64,15 +110,20 @@ async def parseInvoiceText(text):
     "H" - 8
     """
 
-    userPrompt = f"""
-    Please extract the required fields from the following invoice text:
+    # 3. Create the user prompt (now with an image)
+    userPromptParts = [
+        {
+            "text": "Please extract the required fields from this invoice image."
+        },
+        {
+            "inlineData": {
+                "mimeType": imageMimeType,
+                "data": imageBase64
+            }
+        }
+    ]
 
-    ---
-    {text}
-    ---
-    """
-
-    # Define the exact JSON structure we want the AI to return
+    # 4. Define the exact JSON structure we want the AI to return
     responseSchema = {
         "type": "OBJECT",
         "properties": {
@@ -88,9 +139,9 @@ async def parseInvoiceText(text):
         "propertyOrdering": ["gstNumber", "totalAmountStr", "irn", "hsnSacCodes"]
     }
     
-    # This is the payload for the API call
+    # 5. This is the payload for the API call
     payload = {
-        "contents": [{"parts": [{"text": userPrompt}]}],
+        "contents": [{"parts": userPromptParts}],
         "systemInstruction": {"parts": [{"text": systemPrompt}]},
         "generationConfig": {
             "responseMimeType": "application/json",

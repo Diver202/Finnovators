@@ -4,7 +4,8 @@ import streamlit as st
 
 def mockVerifyGstNumber(gstNumber):
     """
-    Simulates a check against a GSTN portal database.
+    Simulates a check against a GST database.
+    (This is a dummy function as requested).
     """
     if not gstNumber:
         return {"status": "Missing", "message": "No GST number found in invoice."}
@@ -23,13 +24,14 @@ def mockVerifyGstNumber(gstNumber):
         
     return {"status": "Unverified", "message": f"GSTIN {gstNumber} could not be verified against the portal. (May be new or invalid)."}
 
-def performDiscrepancyChecks(data, text):
+def performDiscrepancyChecks(data):
     """
     Generates a list of findings based on extracted data.
+    'text' parameter has been removed to match the new Tesseract-free workflow.
     """
     findings = []
     
-    # 1. Check GST Number
+    # --- Check 1: GST Number Verification ---
     gstCheck = mockVerifyGstNumber(data.get("gstNumber"))
     
     if gstCheck["status"] == "Verified":
@@ -53,20 +55,20 @@ def performDiscrepancyChecks(data, text):
         findings.append(st.error)
         findings.append("Could not extract a valid total amount from the invoice.")
     
-    # 3. Check for IRN
+    # --- Check 3: IRN Presence ---
     if data.get("irn"):
         findings.append(st.success)
-        findings.append("IRN successfully extracted.")
+        findings.append(f"IRN found: {data['irn'][:10]}...") # Show snippet
     else:
         findings.append(st.warning)
         findings.append("IRN was not found on the invoice.")
 
     # 4. Check for HSN/SAC
-    if data.get("hsnSacCodes"):
-        findings.append(st.info)
+    if data.get("hsnSacCodes") and len(data["hsnSacCodes"]) > 0:
+        findings.append(st.success)
         findings.append(f"Found {len(data['hsnSacCodes'])} HSN/SAC codes: {', '.join(data['hsnSacCodes'])}")
     else:
         findings.append(st.info)
-        findings.append("No HSN/SAC codes were found.")
-
+        findings.append("No HSN or SAC codes were found.")
+    
     return findings

@@ -5,7 +5,7 @@ import io
 import pdfplumber
 import fitz  # PyMuPDF
 
-from preprocessing_utils import preprocessImage
+from preProcessingUtils import preProcessImage
 
 # --- Tesseract Configuration ---
 tesseractPath = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -22,7 +22,7 @@ def extractTextFromImage(imageBytes):
     """
     try:
         image = Image.open(io.BytesIO(imageBytes))
-        preProcessedImage = preprocessImage(image)
+        preProcessedImage = preProcessImage(image)
         tesseractConfig = "--psm 6"
         text = pytesseract.image_to_string(preProcessedImage, config=tesseractConfig)
         return text
@@ -56,7 +56,7 @@ def extractTextFromPdf(pdfBytes):
                     pix = page.get_pixmap(dpi=300) 
                     imgBytes = pix.tobytes("png")
                     img = Image.open(io.BytesIO(imgBytes))
-                    preProcessedImage = preprocessImage(img)
+                    preProcessedImage = preProcessImage(img)
                     tesseractConfig = "--psm 6"
                     pageText = pytesseract.image_to_string(preProcessedImage, config = tesseractConfig)
                     text += pageText + "\n"
