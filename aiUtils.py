@@ -119,9 +119,11 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
     
     - Reconstruct the 64-character IRN. It might be split across lines.
     - Find the 15-digit GSTIN.
+    - Find the INVOICE date in DD-MM-YYYY format
     - Find all line items (description, hsnSac, quantity, unitPrice) from *all pages*.
     - Find the final total amount (e.g., 'Grand Total' or 'Amount Due').
     - Find the amount (Not percentage) of SGST, CGST, IGST, UTGST and Cess.
+    - Search for the current market rates of every item. For example, petrol can be 90 - 110 Rs/L
     - Return ONLY the JSON object as specified in the schema.
     If a value is not found, return null for that field.
     It is possible that some of these fields are fraudulent. For example, if you do not find GSTIN, do not make one up. Report as null.
@@ -150,6 +152,7 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
     "type": "OBJECT",
     "properties": {
         "gstNumber": {"type": "STRING", "description": "The 15-digit GSTIN."},
+        "date": {"type": "STRING", "description": "Invoice date in DD-MM-YYYY format"},
         "irn": {"type": "STRING", "description": "The 64-character Invoice Reference Number (IRN)."},
         "lineItems": {
             "type": "ARRAY",
@@ -172,13 +175,14 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
         "cessAmount": {"type": "STRING", "description": "The total *amount* (not percentage) of Cess. Return null if not present."},
         "totalAmountStr": {"type": "STRING", "description": "The final total amount (e.g., 'Grand Total' or 'Amount Due')."}
     },
-     "propertyOrdering": ["gstNumber", "irn", "lineItems", "sgstAmount", "cgstAmount", "igstAmount", "utgstAmount", "cessAmount", "totalAmountStr"]
+     "propertyOrdering": ["gstNumber", "irn", "date", "lineItems", "sgstAmount", "cgstAmount", "igstAmount", "utgstAmount", "cessAmount", "totalAmountStr"]
     }
     
     # 5. This is the payload for the API call
     payload = {
         "contents": [{"parts": userPromptParts}],
         "systemInstruction": {"parts": [{"text": systemPrompt}]},
+        # "tools": [{"google_search": {}}],
         "generationConfig": {
             "responseMimeType": "application/json",
             "responseSchema": responseSchema
@@ -211,6 +215,7 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
         return {
             "gstNumber": None,
             "irn": None,
+            "date": None,
             "lineItems": [],
             "sgstAmount": None,
             "cgstAmount": None,
