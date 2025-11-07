@@ -4,3 +4,4 @@
 /raw/
 .streamlit/
 /__pycache__/
+params.csv

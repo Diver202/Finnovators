@@ -112,7 +112,7 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
     Line items may be on page 1 and totals on the last page. Please combine them.
     
     - Reconstruct the 64-character IRN. It might be split across lines.
-    - Find the 15-digit GSTIN.
+    - Find the 15-digit GSTIN. It is always 15 digits.
     - Find the INVOICE NUMBER (e.g., "Inv No.", "Bill No.").
     - Find the INVOICE date in DD-MM-YYYY format
     - Find the name of the vendor (e.g. Techmart etc.)
