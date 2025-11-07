@@ -7,8 +7,9 @@ from difflib import SequenceMatcher
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import os
+import json # Import json for pretty printing the result
 
-# ---------- Normalization Helpers ----------
+# ---------- Normalization & Date Helpers ----------
 
 def normalize_text(s):
     """Remove punctuation, spaces, case differences, underscores, etc."""
@@ -17,6 +18,22 @@ def normalize_text(s):
     s = s.lower()
     s = re.sub(r"[\s\-\_\,\.\'\/\\]+", "", s)
     return s.strip()
+
+def parse_date(s):
+    """Parse date strings from common formats."""
+    if not isinstance(s, str):
+        return None
+    formats = ["%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d.%m.%Y"]
+    for fmt in formats:
+        try:
+            return datetime.strptime(s, fmt)
+        except:
+            continue
+    try:
+        # Try ISO format as a fallback
+        return datetime.fromisoformat(s)
+    except:
+        return None
 
 def text_similarity(a, b):
     """Compute fuzzy text similarity ignoring case/punctuations (0..100)."""
@@ -29,33 +46,171 @@ def compute_hash(inv):
 
 def lineitem_similarity(items1, items2):
     """Compare text content of line items (0..100)."""
-    desc1 = " ".join([i.get("description", "") for i in items1])
-    desc2 = " ".join([i.get("description", "") for i in items2])
+    
+    # --- FIX: Add robustness check ---
+    if isinstance(items1, str):
+        try:
+            items1 = eval(items1)
+        except Exception:
+            items1 = [] # Fail safe
+            
+    if isinstance(items2, str):
+        try:
+            items2 = eval(items2)
+        except Exception:
+            items2 = [] # Fail safe
+    # --- END FIX ---
+
+    # Ensure items are iterable and not None
+    items1 = items1 or []
+    items2 = items2 or []
+
+    desc1 = " ".join([i.get("description", "") for i in items1 if i])
+    desc2 = " ".join([i.get("description", "") for i in items2 if i])
+    
     if not desc1 or not desc2:
         return 0.0
-    vect = CountVectorizer().fit_transform([desc1, desc2])
-    return float(cosine_similarity(vect)[0, 1] * 100)
+    
+    try:
+        vect = CountVectorizer().fit_transform([desc1, desc2])
+        return float(cosine_similarity(vect)[0, 1] * 100)
+    except ValueError:
+        # Happens if vocab is empty (e.g., only stop words)
+        return 0.0
+
 
 def date_diff_days(d1, d2):
     """Return absolute difference in days between d1,d2 strings (try common formats)."""
-    def parse_date(s):
-        if not isinstance(s, str):
-            return None
-        formats = ["%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d.%m.%Y"]
-        for fmt in formats:
-            try:
-                return datetime.strptime(s, fmt)
-            except:
-                continue
-        try:
-            return datetime.fromisoformat(s)
-        except:
-            return None
     da = parse_date(d1)
     db = parse_date(d2)
     if da is None or db is None:
         return np.nan
     return abs((da - db).days)
+
+# ---------- Price Anomaly Detection (NEW) ----------
+
+def prepare_historical_items_db(df):
+    """
+    Flattens the historical invoice DataFrame into a per-item database
+    for easier price comparison.
+    """
+    flat_items = []
+    for _, row in df.iterrows():
+        try:
+            items_list = eval(row["items"]) if isinstance(row.get("items"), str) else row.get("items")
+            invoice_date = parse_date(row.get("invoice_date"))
+            if not invoice_date or not items_list or not isinstance(items_list, list):
+                continue
+                
+            for item in items_list:
+                if not isinstance(item, dict) or not all(k in item for k in ('description', 'hsn', 'unit_price')):
+                    continue
+                
+                flat_items.append({
+                    "vendor_gstin": normalize_text(row.get("vendor_gstin")),
+                    "invoice_date": invoice_date,
+                    "item_description": item.get("description"),
+                    "normalized_description": normalize_text(item.get("description")),
+                    "item_hsn": str(item.get("hsn")),
+                    "unit_price": float(item.get("unit_price"))
+                })
+        except Exception:
+            continue # Skip rows with bad 'items' data
+            
+    if not flat_items:
+        return pd.DataFrame()
+        
+    df_items = pd.DataFrame(flat_items)
+    df_items = df_items.sort_values(by="invoice_date", ascending=False)
+    return df_items
+
+def detect_line_item_price_anomalies(
+    new_invoice, 
+    historical_items_df, 
+    inflation_rate=0.05, 
+    margin=0.20
+):
+    """
+    Checks each line item's price against its historical price from the same
+    vendor, adjusted for inflation and a margin of error.
+    
+    :param inflation_rate: Assumed annual inflation (e.g., 0.05 for 5%)
+    :param margin: Acceptable variance above inflation (e.g., 0.20 for 20%)
+    """
+    anomalies = []
+    if historical_items_df.empty:
+        return anomalies
+
+    new_vendor_gstin = normalize_text(new_invoice.get("vendor_gstin"))
+    new_date = parse_date(new_invoice.get("invoice_date"))
+    if not new_date:
+        return [] # Cannot check without a valid new date
+
+    new_items_list = new_invoice.get("items", [])
+    # Handle if new_invoice items are passed as a string
+    if isinstance(new_items_list, str):
+        try:
+            new_items_list = eval(new_items_list)
+        except Exception:
+            new_items_list = []
+    
+    if not isinstance(new_items_list, list):
+        new_items_list = []
+
+    for item in new_items_list:
+        try:
+            if not isinstance(item, dict): continue
+
+            new_desc = item.get("description")
+            new_norm_desc = normalize_text(new_desc)
+            new_hsn = str(item.get("hsn"))
+            new_price = float(item.get("unit_price"))
+            
+            # Find historical purchases of this *exact* item from this *exact* vendor
+            df_hist = historical_items_df[
+                (historical_items_df['vendor_gstin'] == new_vendor_gstin) &
+                (historical_items_df['item_hsn'] == new_hsn) &
+                (historical_items_df['normalized_description'] == new_norm_desc) &
+                (historical_items_df['invoice_date'] < new_date) # Only look at past
+            ]
+            
+            if df_hist.empty:
+                # No history for this item from this vendor, cannot check.
+                continue
+                
+            # Get the most recent historical purchase
+            last_purchase = df_hist.iloc[0]
+            last_price = last_purchase['unit_price']
+            last_date = last_purchase['invoice_date']
+            
+            if last_price <= 0:
+                continue # Cannot compare against a zero or negative price
+                
+            # Calculate time difference in years
+            days_diff = (new_date - last_date).days
+            if days_diff <= 30:
+                # Too recent for inflation check, just check for large jump
+                acceptable_limit = last_price * (1 + margin) 
+            else:
+                # Apply inflation calculation
+                years_diff = days_diff / 365.25
+                expected_price = last_price * ((1 + inflation_rate) ** years_diff)
+                acceptable_limit = expected_price * (1 + margin)
+            
+            # Check if the new price exceeds the acceptable limit
+            if new_price > acceptable_limit:
+                pct_diff = ((new_price / acceptable_limit) - 1) * 100
+                reason = (
+                    f"Price Anomaly: Item '{new_desc}' (HSN: {new_hsn}) unit price {new_price:,.2f} "
+                    f"is {pct_diff:.1f}% above the acceptable limit of {acceptable_limit:,.2f}. "
+                    f"(Based on last price {last_price:,.2f} from {last_date.strftime('%Y-%m-%d')})."
+                )
+                anomalies.append(reason)
+                
+        except Exception:
+            continue # Skip item if data is invalid (e.g., non-numeric price)
+            
+    return anomalies
 
 # ---------- Ghost Invoice Detection (conservative) ----------
 
@@ -70,15 +225,7 @@ def detect_ghost_invoice(new_inv, historical_df):
 
     # Prepare helper lists
     seen_gstins = set(historical_df["vendor_gstin"].astype(str).values)
-    past_items_flat = []
-    for row in historical_df["items"]:
-        try:
-            past = eval(row) if isinstance(row, str) else []
-            past_items_flat.extend([i.get("hsn", "") for i in past])
-        except:
-            continue
-    past_hsn_set = set([x for x in past_items_flat if x])
-
+    
     unseen_gstin = gstin not in seen_gstins
 
     # HSN inconsistency: new HSNs not observed in historical dataset for this vendor
@@ -86,23 +233,33 @@ def detect_ghost_invoice(new_inv, historical_df):
     vendor_hsns = set()
     for r in vendor_rows["items"]:
         try:
-            its = eval(r) if isinstance(r, str) else []
-            vendor_hsns.update([i.get("hsn", "") for i in its if i.get("hsn")])
+            its = eval(r) if isinstance(r, str) else r
+            if isinstance(its, list):
+                vendor_hsns.update([i.get("hsn", "") for i in its if isinstance(i, dict) and i.get("hsn")])
         except:
             continue
-    new_hsns = set([i.get("hsn", "") for i in new_inv.get("items", []) if i.get("hsn")])
+            
+    new_items_list = new_inv.get("items", [])
+    if isinstance(new_items_list, str):
+        try: new_items_list = eval(new_items_list)
+        except: new_items_list = []
+    if not isinstance(new_items_list, list):
+        new_items_list = []
+        
+    new_hsns = set([i.get("hsn", "") for i in new_items_list if isinstance(i, dict) and i.get("hsn")])
     hsn_unseen_for_vendor = len(new_hsns - vendor_hsns) > 0 if vendor_rows.shape[0] > 0 else False
 
     # Price anomaly: compare new_inv total to vendor median (if vendor history exists)
     price_anomaly = False
-    if vendor_rows.shape[0] >= 3:
+    if vendor_rows.shape[0] >= 3: # Require at least 3 historical invoices for median
         try:
             med = vendor_rows["total_amount"].astype(float).median()
             if med > 0:
+                # Flag if total is 10x higher or 90% lower
                 if new_inv.get("total_amount", 0) > 10 * med or new_inv.get("total_amount", 0) < 0.1 * med:
                     price_anomaly = True
         except:
-            price_anomaly = False
+            price_anomaly = False # Fail safe
 
     # Conservative decision: require at least two strong signals to label ghost
     strong_signals = 0
@@ -130,16 +287,32 @@ def check_invoice(new_invoice, csv_path="invoice_data.csv", log_path="suspect_in
     - reads historical data from csv_path
     - applies exact/near-duplicate logic with invoice-number priority
     - conservative ghost detection
+    - line-item price anomaly detection (NEW)
     - logs suspicious invoices to log_path
     - returns structured report dict for frontend
     """
     if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"{csv_path} not found.")
+        # If no history, we can't check. Log as "CLEAN" but maybe add note?
+        # For this logic, we'll assume a missing file means we just append.
+        print(f"Warning: {csv_path} not found. Appending new invoice as first entry.")
+        append_to_master_csv(new_invoice, csv_path)
+        return {
+            "invoice_hash": compute_hash(new_invoice),
+            "exact_duplicate": False, "exact_duplicate_match": None,
+            "near_duplicates": [], "ghost_signals": [], 
+            "line_item_price_anomalies": [],
+            "overall_flag": "CLEAN",
+            "reasons": ["No historical data to compare against."]
+        }
 
     df = pd.read_csv(csv_path)
     # ensure numeric total_amount
     if "total_amount" in df.columns:
         df["total_amount"] = pd.to_numeric(df["total_amount"], errors="coerce").fillna(0.0)
+    
+    # Prepare flattened item DB for price checks
+    df_items = prepare_historical_items_db(df)
+    
     new_hash = compute_hash(new_invoice)
 
     result = {
@@ -148,30 +321,33 @@ def check_invoice(new_invoice, csv_path="invoice_data.csv", log_path="suspect_in
         "exact_duplicate_match": None,
         "near_duplicates": [],
         "ghost_signals": [],
+        "line_item_price_anomalies": [], # NEW
         "overall_flag": "CLEAN",
         "reasons": []
     }
 
+    # Helper function to safely build 'existing' dict from a DataFrame row
+    def get_existing_from_row(row):
+        try:
+            items_data = eval(row["items"]) if isinstance(row.get("items"), str) else row.get("items")
+            if not isinstance(items_data, list):
+                items_data = []
+        except Exception:
+            items_data = []
+            
+        return {
+            "invoice_no": row.get("invoice_no", ""),
+            "invoice_date": row.get("invoice_date", ""),
+            "vendor_name": row.get("vendor_name", ""),
+            "vendor_gstin": row.get("vendor_gstin", ""),
+            "total_amount": float(row.get("total_amount") or 0),
+            "items": items_data
+        }
+
+
     # 1) Exact Duplicate by HASH (strict)
     for idx, row in df.iterrows():
-        try:
-            existing = {
-                "invoice_no": row["invoice_no"],
-                "invoice_date": row["invoice_date"],
-                "vendor_name": row["vendor_name"],
-                "vendor_gstin": row["vendor_gstin"],
-                "total_amount": float(row["total_amount"]),
-                "items": eval(row["items"]) if isinstance(row.get("items"), str) else []
-            }
-        except Exception:
-            existing = {
-                "invoice_no": row.get("invoice_no", ""),
-                "invoice_date": row.get("invoice_date", ""),
-                "vendor_name": row.get("vendor_name", ""),
-                "vendor_gstin": row.get("vendor_gstin", ""),
-                "total_amount": float(row.get("total_amount") or 0),
-                "items": []
-            }
+        existing = get_existing_from_row(row)
         if compute_hash(existing) == new_hash:
             result["exact_duplicate"] = True
             result["exact_duplicate_match"] = int(idx)
@@ -181,137 +357,85 @@ def check_invoice(new_invoice, csv_path="invoice_data.csv", log_path="suspect_in
             return result
 
     # 2) Invoice-number first priority checks (very strict thresholds)
-    # if invoice number extremely similar (>=95) AND totals near-identical -> HIGH_RISK
-    # but if invoice_no similar but lineitems differ strongly, suppress flag
     for idx, row in df.iterrows():
-        try:
-            existing = {
-                "invoice_no": row["invoice_no"],
-                "invoice_date": row["invoice_date"],
-                "vendor_name": row["vendor_name"],
-                "vendor_gstin": row["vendor_gstin"],
-                "total_amount": float(row["total_amount"]),
-                "items": eval(row["items"]) if isinstance(row.get("items"), str) else []
-            }
-        except Exception:
-            existing = {
-                "invoice_no": row.get("invoice_no", ""),
-                "invoice_date": row.get("invoice_date", ""),
-                "vendor_name": row.get("vendor_name", ""),
-                "vendor_gstin": row.get("vendor_gstin", ""),
-                "total_amount": float(row.get("total_amount") or 0),
-                "items": []
-            }
+        existing = get_existing_from_row(row)
 
         invno_sim = text_similarity(new_invoice.get("invoice_no", ""), existing.get("invoice_no", ""))
         total_rel_diff = 0.0
         if existing["total_amount"] > 0:
             total_rel_diff = abs(new_invoice.get("total_amount", 0.0) - existing["total_amount"]) / existing["total_amount"]
+        else:
+             total_rel_diff = 0.0 if new_invoice.get("total_amount", 0.0) == 0.0 else 1.0
+
         line_sim = lineitem_similarity(new_invoice.get("items", []), existing.get("items", []))
 
         # If invoice number is virtually identical and totals match -> immediate high risk
         if invno_sim >= 95 and total_rel_diff <= 0.05:
-            # but require some item similarity OR same GSTIN OR very close dates to avoid false positive
             date_diff = date_diff_days(new_invoice.get("invoice_date", ""), existing.get("invoice_date", ""))
             gstin_same = normalize_text(new_invoice.get("vendor_gstin", "")) == normalize_text(existing.get("vendor_gstin", ""))
+            
             if (line_sim >= 50) or gstin_same or (not np.isnan(date_diff) and date_diff <= 3):
-                near_dup = _build_near_dup_entry(idx, existing, invno_sim, line_sim, total_rel_diff, date_diff, reason_special="Invoice number nearly identical and amounts match")
+                near_dup = _build_near_dup_entry(new_invoice, idx, existing, invno_sim, line_sim, total_rel_diff, date_diff, reason_special="Invoice number nearly identical and amounts match")
                 result["near_duplicates"].append(near_dup)
                 result["overall_flag"] = "HIGH_RISK_NEAR_DUPLICATE"
                 result["reasons"].append("Invoice number extremely similar + totals match -> high risk")
                 log_suspect_invoice(new_invoice, result, log_path)
                 return result
             else:
-                # invoice number similar but items totally different and other signals absent -> do NOT flag
-                continue
+                continue # invoice number similar but items/vendor totally different -> do NOT flag
 
     # 3) Date-priority checks (secondary)
-    # If invoice dates are identical or within 1 day and totals similar and vendor similar -> raise medium risk
     for idx, row in df.iterrows():
-        try:
-            existing = {
-                "invoice_no": row["invoice_no"],
-                "invoice_date": row["invoice_date"],
-                "vendor_name": row["vendor_name"],
-                "vendor_gstin": row["vendor_gstin"],
-                "total_amount": float(row["total_amount"]),
-                "items": eval(row["items"]) if isinstance(row.get("items"), str) else []
-            }
-        except Exception:
-            existing = {
-                "invoice_no": row.get("invoice_no", ""),
-                "invoice_date": row.get("invoice_date", ""),
-                "vendor_name": row.get("vendor_name", ""),
-                "vendor_gstin": row.get("vendor_gstin", ""),
-                "total_amount": float(row.get("total_amount") or 0),
-                "items": []
-            }
+        existing = get_existing_from_row(row)
 
         date_diff = date_diff_days(new_invoice.get("invoice_date", ""), existing.get("invoice_date", ""))
         total_rel = 0.0
         if existing["total_amount"] > 0:
             total_rel = abs(new_invoice.get("total_amount", 0.0) - existing["total_amount"]) / existing["total_amount"]
+        else:
+            total_rel = 0.0 if new_invoice.get("total_amount", 0.0) == 0.0 else 1.0
+
         vendor_sim = text_similarity(new_invoice.get("vendor_name", ""), existing.get("vendor_name", ""))
         line_sim = lineitem_similarity(new_invoice.get("items", []), existing.get("items", []))
 
         if (not np.isnan(date_diff) and date_diff <= 1) and total_rel <= 0.05 and vendor_sim >= 75:
-            # ensure items are not entirely different
             if line_sim >= 40 or normalize_text(new_invoice.get("vendor_gstin","")) == normalize_text(existing.get("vendor_gstin","")):
-                near_dup = _build_near_dup_entry(idx, existing, text_similarity(new_invoice.get("invoice_no",""), existing.get("invoice_no","")), line_sim, total_rel, date_diff, reason_special="Dates and totals very close")
+                invno_sim_val = text_similarity(new_invoice.get("invoice_no",""), existing.get("invoice_no",""))
+                near_dup = _build_near_dup_entry(new_invoice, idx, existing, invno_sim_val, line_sim, total_rel, date_diff, reason_special="Dates and totals very close")
                 result["near_duplicates"].append(near_dup)
                 result["overall_flag"] = "MEDIUM_RISK_POSSIBLE_DUPLICATE"
                 result["reasons"].append("Invoice date and totals close -> possible duplicate")
                 # don't return — continue scanning to find higher-confidence matches
             else:
-                # similar date/totals but line items divergent -> ignore (logical)
-                continue
+                continue # similar date/totals but line items divergent -> ignore (logical)
 
     # 4) GSTIN + item/amount checks (tertiary)
-    # If GSTIN matches and totals very close and invoice_no somewhat similar → possible duplicate
     for idx, row in df.iterrows():
-        try:
-            existing = {
-                "invoice_no": row["invoice_no"],
-                "invoice_date": row["invoice_date"],
-                "vendor_name": row["vendor_name"],
-                "vendor_gstin": row["vendor_gstin"],
-                "total_amount": float(row["total_amount"]),
-                "items": eval(row["items"]) if isinstance(row.get("items"), str) else []
-            }
-        except Exception:
-            existing = {
-                "invoice_no": row.get("invoice_no", ""),
-                "invoice_date": row.get("invoice_date", ""),
-                "vendor_name": row.get("vendor_name", ""),
-                "vendor_gstin": row.get("vendor_gstin", ""),
-                "total_amount": float(row.get("total_amount") or 0),
-                "items": []
-            }
+        existing = get_existing_from_row(row)
 
         gstin_same = normalize_text(new_invoice.get("vendor_gstin","")) == normalize_text(existing.get("vendor_gstin",""))
         total_rel = 0.0
         if existing["total_amount"] > 0:
             total_rel = abs(new_invoice.get("total_amount", 0.0) - existing["total_amount"]) / existing["total_amount"]
+        else:
+            total_rel = 0.0 if new_invoice.get("total_amount", 0.0) == 0.0 else 1.0
+            
         invno_sim = text_similarity(new_invoice.get("invoice_no",""), existing.get("invoice_no",""))
         line_sim = lineitem_similarity(new_invoice.get("items", []), existing.get("items", []))
 
-        # require at least two supporting signals: gstin_same + (totals close OR invno similar OR line items similar)
         supporting = 0
-        if total_rel <= 0.05:
-            supporting += 1
-        if invno_sim >= 80:
-            supporting += 1
-        if line_sim >= 60:
-            supporting += 1
+        if total_rel <= 0.05: supporting += 1
+        if invno_sim >= 80: supporting += 1
+        if line_sim >= 60: supporting += 1
 
         if gstin_same and supporting >= 1:
-            # avoid flagging when items are clearly different (line_sim < 30) unless invoice number is highly similar
             if line_sim < 30 and invno_sim < 90:
-                # logical: same GSTIN but different items likely valid; do not flag
-                continue
-            near_dup = _build_near_dup_entry(idx, existing, invno_sim, line_sim, total_rel, date_diff_days(new_invoice.get("invoice_date",""), existing.get("invoice_date","")), reason_special="GSTIN matches and supporting signals present")
+                continue # logical: same GSTIN but different items likely valid; do not flag
+            
+            date_diff_val = date_diff_days(new_invoice.get("invoice_date",""), existing.get("invoice_date",""))
+            near_dup = _build_near_dup_entry(new_invoice, idx, existing, invno_sim, line_sim, total_rel, date_diff_val, reason_special="GSTIN matches and supporting signals present")
             result["near_duplicates"].append(near_dup)
-            # escalate if strong
+            
             if invno_sim >= 90 or total_rel <= 0.02:
                 result["overall_flag"] = "HIGH_RISK_NEAR_DUPLICATE"
                 result["reasons"].append("GSTIN match with strong supporting signals -> high risk")
@@ -321,7 +445,7 @@ def check_invoice(new_invoice, csv_path="invoice_data.csv", log_path="suspect_in
                 if result["overall_flag"] == "CLEAN":
                     result["overall_flag"] = "MEDIUM_RISK_POSSIBLE_DUPLICATE"
 
-    # 5) Conservative ghost detection (requires >=2 strong signals)
+    # 5) Conservative ghost detection
     ghost_reasons = detect_ghost_invoice(new_invoice, df)
     if ghost_reasons:
         result["ghost_signals"] = ghost_reasons
@@ -331,21 +455,28 @@ def check_invoice(new_invoice, csv_path="invoice_data.csv", log_path="suspect_in
         log_suspect_invoice(new_invoice, result, log_path)
         return result
 
-    # 6) If we collected near_duplicates but not returned earlier, choose the top match to set final flag
+    # 6) Line Item Price Anomaly Detection (NEW)
+    price_anomalies = detect_line_item_price_anomalies(new_invoice, df_items)
+    if price_anomalies:
+        result["line_item_price_anomalies"] = price_anomalies
+        result["reasons"].extend(price_anomalies)
+        if result["overall_flag"] == "CLEAN":
+            result["overall_flag"] = "PRICE_ANOMALY"
+        log_suspect_invoice(new_invoice, result, log_path)
+        return result
+
+    # 7) If we collected near_duplicates but not returned earlier, choose the top match
     if result["near_duplicates"]:
-        # sort by a combination: invoice_no_sim desc, lineitems_sim desc, total_rel_diff asc
         def score_key(x):
             f = x["features"]
-            return (f["invoice_no_sim"], f["lineitems_sim"], -f["total_rel_diff"])
+            # Prioritize invoice sim, then item sim, then (lack of) total diff
+            return (f.get("invoice_no_sim", 0), f.get("lineitems_sim", 0), -f.get("total_rel_diff", 1))
+        
         result["near_duplicates"] = sorted(result["near_duplicates"], key=score_key, reverse=True)
         top = result["near_duplicates"][0]
-        # set overall flag if not already set
+        
         if result["overall_flag"] == "CLEAN":
-            top_conf = top["features"]["final_confidence"]
-                # ----------- Auto-update Master CSV -----------
-    
-            append_to_master_csv(new_invoice, csv_path)
-
+            top_conf = top.get("features", {}).get("final_confidence", 0)
             if top_conf >= 0.9:
                 result["overall_flag"] = "HIGH_RISK_NEAR_DUPLICATE"
             elif top_conf >= 0.75:
@@ -353,33 +484,56 @@ def check_invoice(new_invoice, csv_path="invoice_data.csv", log_path="suspect_in
             else:
                 result["overall_flag"] = "LOW_RISK_RECHECK"
             result["reasons"].append("Similarity-based match found; review required")
-            log_suspect_invoice(new_invoice, result, log_path)
-            # ----------- Auto-update Master CSV -----------
-    
+        
+        log_suspect_invoice(new_invoice, result, log_path)
+        return result # Return here, as it's not "CLEAN"
+
+    # 8) If no flags raised, it's CLEAN. Append to master CSV.
+    if result["overall_flag"] == "CLEAN":
         append_to_master_csv(new_invoice, csv_path)
 
     return result
 
-# ---------- Helper to build near-dup entry ----------
-def _build_near_dup_entry(idx, existing, invno_sim, line_sim, total_rel_diff, date_diff, reason_special=None):
+# ---------- Helper to build near-dup entry (FIXED) ----------
+def _build_near_dup_entry(new_invoice, idx, existing, invno_sim, line_sim, total_rel_diff, date_diff, reason_special=None):
+    
+    new_items_list = new_invoice.get("items", [])
+    if isinstance(new_items_list, str):
+        try: new_items_list = eval(new_items_list)
+        except: new_items_list = []
+    if not isinstance(new_items_list, list): new_items_list = []
+
+    existing_items_list = existing.get("items", [])
+    if isinstance(existing_items_list, str):
+        try: existing_items_list = eval(existing_items_list)
+        except: existing_items_list = []
+    if not isinstance(existing_items_list, list): existing_items_list = []
+
+    new_hsns = set([i.get("hsn","") for i in new_items_list if isinstance(i, dict) and i.get("hsn")])
+    old_hsns = set([i.get("hsn","") for i in existing_items_list if isinstance(i, dict) and i.get("hsn")])
+    hsn_mismatch = 1.0 if new_hsns != old_hsns else 0.0
+
     features = {
         "invoice_no_sim": round(float(invno_sim), 3),
-        "vendor_name_sim": round(float(text_similarity(existing.get("vendor_name",""), existing.get("vendor_name",""))), 3),  # will be 100 for same record
-        "gstin_match": 1.0 if normalize_text(existing.get("vendor_gstin","")) == normalize_text(existing.get("vendor_gstin","")) else 0.0,
+        "vendor_name_sim": round(float(text_similarity(new_invoice.get("vendor_name",""), existing.get("vendor_name",""))), 3),
+        "gstin_match": 1.0 if normalize_text(new_invoice.get("vendor_gstin","")) == normalize_text(existing.get("vendor_gstin","")) else 0.0,
         "total_rel_diff": round(float(total_rel_diff), 6),
-        "date_diff_days": float(date_diff) if date_diff is not None else np.nan,
+        "date_diff_days": float(date_diff) if not np.isnan(date_diff) else np.nan,
         "lineitems_sim": round(float(line_sim), 3),
-        "hsn_mismatch_norm": 0 if set([i.get("hsn","") for i in (existing.get("items") or [])]) == set([i.get("hsn","") for i in (existing.get("items") or [])]) else 0
+        "hsn_mismatch_norm": hsn_mismatch
     }
-    # heuristic final confidence (keeps invoice-number priority)
-    # weights tuned to prioritize invoice_no and date then GSTIN and items
+    
+    # heuristic final confidence
     w_inv = 0.35
     w_date = 0.20
     w_gst = 0.15
     w_item = 0.20
     w_amount = 0.10
     amount_factor = 1.0 - min(1.0, features["total_rel_diff"])
-    date_factor = 1.0 if features["date_diff_days"] <= 2 else max(0.0, 1 - (features["date_diff_days"]/30))
+    date_factor = 1.0
+    if not np.isnan(features["date_diff_days"]):
+        date_factor = 1.0 if features["date_diff_days"] <= 2 else max(0.0, 1 - (features["date_diff_days"]/30))
+        
     final_score = (
         w_inv * (features["invoice_no_sim"] / 100.0) +
         w_date * date_factor +
@@ -398,7 +552,7 @@ def _build_near_dup_entry(idx, existing, invno_sim, line_sim, total_rel_diff, da
         reasons.append("Line items similar")
     if features["total_rel_diff"] <= 0.05:
         reasons.append("Totals nearly identical")
-    if features["date_diff_days"] <= 3:
+    if not np.isnan(features["date_diff_days"]) and features["date_diff_days"] <= 3:
         reasons.append("Dates close")
     if features["gstin_match"] == 1.0:
         reasons.append("GSTIN exact match")
@@ -413,15 +567,22 @@ def _build_near_dup_entry(idx, existing, invno_sim, line_sim, total_rel_diff, da
         },
         "features": features,
         "heuristic_confidence": features["final_confidence"],
-        "model_confidence": features["final_confidence"],
+        "model_confidence": features["final_confidence"], # Using heuristic as model
         "final_confidence": features["final_confidence"],
         "reasons": reasons,
-        "existing_full": existing
+        "existing_full": existing # For potential UI display
     }
     return near_dup
 
-# ---------- Logging ----------
+# ---------- Logging (FIXED) ----------
 def log_suspect_invoice(new_invoice, result, log_path):
+    # Find the highest confidence score from near-duplicates
+    max_conf = 0.0
+    if result.get("exact_duplicate"):
+        max_conf = 1.0
+    elif result.get("near_duplicates"):
+        max_conf = max([n.get("final_confidence", 0) for n in result.get("near_duplicates", [])], default=0.0)
+        
     log_data = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "invoice_no": new_invoice.get("invoice_no"),
@@ -429,7 +590,7 @@ def log_suspect_invoice(new_invoice, result, log_path):
         "invoice_date": new_invoice.get("invoice_date"),
         "total_amount": new_invoice.get("total_amount"),
         "flag": result.get("overall_flag"),
-        "confidence": max([n["final_confidence"] for n in result.get("near_duplicates", [])], default=1.0 if result.get("exact_duplicate") else 0.0),
+        "confidence": max_conf,
         "reasons": "; ".join(result.get("reasons", []))
     }
 
@@ -439,36 +600,84 @@ def log_suspect_invoice(new_invoice, result, log_path):
     else:
         df.to_csv(log_path, mode='a', header=False, index=False)
 
-# test_invoice = {
-#     "invoice_no": "INV-002",
-#     "invoice_date": "12-10-2025",
-#     "vendor_name": "TechMart",
-#     "vendor_gstin": "27AAACT1234F1Z9",
-#     "total_amount": 5000,
-#     "items": [
-#         {"description": "Hydra Crane Hire", "hsn": "9985", "quantity": 1, "unit_price": 3000, "amount": 3000, "gst_rate": 18}
-#     ]
-# }
-
-result = check_invoice(test_invoice, csv_path="invoice_data.csv")
-print(result)
-
 def append_to_master_csv(new_invoice, csv_path="invoice_data.csv"):
     """Appends a clean (non-duplicate) invoice to the master CSV."""
+    
+    # Ensure items are stored as a string
+    items_str = str(new_invoice.get("items", []))
+    if isinstance(new_invoice.get("items"), str):
+        items_str = new_invoice.get("items")
+
     df_new = pd.DataFrame([{
-        "invoice_no": new_invoice["invoice_no"],
-        "invoice_date": new_invoice["invoice_date"],
-        "vendor_name": new_invoice["vendor_name"],
-        "vendor_gstin": new_invoice["vendor_gstin"],
-        "total_amount": new_invoice["total_amount"],
-        "items": str(new_invoice["items"])  # Store list as string safely
+        "invoice_no": new_invoice.get("invoice_no"),
+        "invoice_date": new_invoice.get("invoice_date"),
+        "vendor_name": new_invoice.get("vendor_name"),
+        "vendor_gstin": new_invoice.get("vendor_gstin"),
+        "total_amount": new_invoice.get("total_amount"),
+        "items": items_str # Store list as string
     }])
     
+    # Ensure all columns from the user's example are present, even if blank
+    for col in ["item_description", "unit_price", "amount", "gst_rate"]:
+        if col not in df_new.columns:
+            df_new[col] = pd.NA
+            
     if not os.path.exists(csv_path):
         df_new.to_csv(csv_path, index=False)
     else:
-        df_existing = pd.read_csv(csv_path)
-        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-        df_combined.to_csv(csv_path, index=False)
-    
-    add_invoice(invoice_no, date, gstin)
+        # Append, ensuring column order matches if possible
+        try:
+            df_existing = pd.read_csv(csv_path)
+            # Re-order new_df columns to match existing
+            df_new = df_new[df_existing.columns]
+            df_new.to_csv(csv_path, mode='a', header=False, index=False)
+        except Exception:
+             # Fallback if columns mismatch badly
+            df_new.to_csv(csv_path, mode='a', header=False, index=False)
+            
+# ---------- Test Case (UNCOMMENTED) ----------
+
+# This test invoice will be flagged for PRICE_ANOMALY
+# It sells a 'Laptop' (HSN 8471) for 75000,
+# while historical data shows a price of 48000 on 01-11-2025 (INV009).
+# The time difference is small, so inflation won't account for this jump.
+# test_invoice = {
+#      "invoice_no": "INV-TEST-001",
+#      "invoice_date": "10-11-2025",
+#      "vendor_name": "TechMart",
+#      "vendor_gstin": "27AAACT1234F1Z9",
+#      "total_amount": 75000,
+#      "items": [
+#          {"description": "Laptop", "hsn": "8471", "quantity": 1, "unit_price": 75000, "amount": 75000, "gst_rate": 18}
+#      ]
+# }
+
+# This test invoice should be flagged as an EXACT_DUPLICATE of INV001
+# Make sure to use the string format for items if you want to test the bug fix
+# test_invoice = {
+#      "invoice_no": "INV001",
+#      "invoice_date": "12-10-2025",
+#      "vendor_name": "TechMart",
+#      "vendor_gstin": "27AAACT1234F1Z9",
+#      "total_amount": 50000,
+#      "items": "[{'description': 'Laptop', 'hsn': '8471', 'quantity': 1, 'unit_price': 50000}]"
+# }
+
+# This test invoice should be CLEAN
+# test_invoice = {
+#      "invoice_no": "INV-NEW-999",
+#      "invoice_date": "10-11-2025",
+#      "vendor_name": "New Vendor Inc",
+#      "vendor_gstin": "99ZZZYY1234A1Z0",
+#      "total_amount": 1000,
+#      "items": [
+#          {"description": "Stapler", "hsn": "8305", "quantity": 1, "unit_price": 1000, "amount": 1000, "gst_rate": 12}
+#      ]
+# }
+
+
+print("--- Running Invoice Check ---")
+result = check_invoice(test_invoice, csv_path="invoice_data.csv")
+print("\n--- Check Result ---")
+print(json.dumps(result, indent=2, default=str))
+print("--------------------")
