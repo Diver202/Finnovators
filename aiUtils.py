@@ -113,7 +113,9 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
     
     - Reconstruct the 64-character IRN. It might be split across lines.
     - Find the 15-digit GSTIN.
+    - Find the INVOICE NUMBER (e.g., "Inv No.", "Bill No.").
     - Find the INVOICE date in DD-MM-YYYY format
+    - Find the name of the vendor (e.g. Techmart etc.)
     - Find all line items (description, hsnSac, quantity, unitPrice, GST per item (total sum of CGST IGST etc.), Discount per item) from *all pages*.
     - Find the final total amount (e.g., 'Grand Total' or 'Amount Due').
     - Find the total amount (Not percentage) of SGST, CGST, IGST, UTGST and Cess.
@@ -144,8 +146,10 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
     "type": "OBJECT",
     "properties": {
         "gstNumber": {"type": "STRING", "description": "The 15-digit GSTIN."},
+        "invoiceNumber": {"type": "STRING", "description": "The main invoice number, (e.g., Inv No, Bill No)."},
         "date": {"type": "STRING", "description": "Invoice date in DD-MM-YYYY format"},
         "irn": {"type": "STRING", "description": "The 64-character Invoice Reference Number (IRN)."},
+        "vendorName": {"type": "STRING", "description": "Name of the vendor (Mostly company, like Techmart etc. Can be individual too)"},
         "lineItems": {
             "type": "ARRAY",
             "description": "A list of all items/services from the invoice.",
@@ -157,7 +161,6 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
                     "quantity": {"type": "NUMBER", "description": "The quantity of the item."},
                     "unitPrice": {"type": "NUMBER", "description": "The price per unit of the item."},
                     "GST":{"type": "NUMBER", "description": "Total GST per item, if given."},
-                    # --- CRITICAL FIX: Changed "Discount" to "NUMBER" ---
                     "Discount": {"type": "NUMBER", "description": "Discount per item, if given."}
                 },
                 "propertyOrdering": ["description", "hsnSac", "quantity", "unitPrice", "GST", "Discount"]
@@ -172,9 +175,9 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
         "totalDiscount": {"type": "STRING", "description": "Discount applied over the whole, separate from the individual discounts. Return null if not present."},
         "totalAmountStr": {"type": "STRING", "description": "The final total amount (e.g., 'Grand Total' or 'Amount Due')."}
     },
-    # --- CRITICAL FIX: Added new fields to propertyOrdering ---
+    # --- CRITICAL FIX: Added COMMA after "vendorName" ---
     "propertyOrdering": [
-        "gstNumber", "irn", "date", "lineItems", 
+        "gstNumber", "invoiceNumber", "irn", "date", "vendorName", "lineItems", 
         "sgstAmount", "cgstAmount", "igstAmount", "utgstAmount", "cessAmount", 
         "freightAndDelivery", "totalDiscount", "totalAmountStr"
         ]
@@ -207,11 +210,13 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
 
     except Exception as e:
         st.error(f"Failed to parse invoice with AI: {e}")
-        # Return a more complete empty structure
+        # --- CRITICAL FIX: Added new fields to the empty structure ---
         return {
             "gstNumber": None,
+            "invoiceNumber": None,
             "irn": None,
             "date": None,
+            "vendorName": None,
             "lineItems": [],
             "sgstAmount": None,
             "cgstAmount": None,

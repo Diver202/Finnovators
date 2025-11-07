@@ -5,8 +5,9 @@ import asyncio
 from aiUtils import parseInvoiceMultimodal
 from validationUtils import performDiscrepancyChecks
 from saveJaison import saveJaisonToFile
-# --- NEW: Import the HSN validator ---
 from HSNSACValidate import validateHSNRates
+# --- NEW: Import the CSV saver ---
+from csvUtils import saveToCSV
 
 
 # --- Streamlit App UI (Must be async) ---
@@ -38,8 +39,11 @@ async def main():
                 parsedData = await parseInvoiceMultimodal(fileBytes, fileType)
             
             if parsedData:
-                # We can save this immediately
+                # Save to JSON
                 saveJaisonToFile(parsedData, uploadedFile.name)
+                # --- NEW: Save to CSV ---
+                saveToCSV(parsedData, "params.csv")
+
             st.json(parsedData)
             
         with col2:
