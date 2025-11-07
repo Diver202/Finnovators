@@ -12,7 +12,6 @@ async def fetchFromGemini(payload):
     """
     Handles the asynchronous API call to Gemini with exponential backoff.
     """
-    # --- I have preserved your API key ---
     apiKey = "AIzaSyAdnKDhhSEmycIQXO7u6AA1CPlcESElJh0"
     apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={apiKey}"
     
@@ -20,7 +19,8 @@ async def fetchFromGemini(payload):
     maxRetries = 5
     delay = 1  # Initial delay in seconds
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    # --- CHANGE: Increased timeout for larger multi-page files ---
+    async with httpx.AsyncClient(timeout=120.0) as client:
         for attempt in range(maxRetries):
             try:
                 response = await client.post(apiUrl, headers=headers, json=payload)
@@ -28,7 +28,6 @@ async def fetchFromGemini(payload):
                 
                 result = response.json()
                 
-                # Extract the raw JSON text from the model's response
                 jsonText = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
                 return jsonText
 
@@ -41,65 +40,91 @@ async def fetchFromGemini(payload):
             except (KeyError, IndexError, json.JSONDecodeError) as e:
                 st.error(f"Error parsing AI response: {e}")
                 st.error(f"Raw response: {result}")
-                return "{}" # Return empty JSON on parse failure
+                return "{}"
 
-def convertFileToImageBytes(fileBytes, fileType):
+# --- CHANGE: This function is now internal and returns a LIST of image parts ---
+def _convertFileToImageParts(fileBytes, fileType):
     """
-    Converts the uploaded file (PDF or Image) into PNG image bytes.
-    Processes ONLY the first page of a PDF.
+    Converts an uploaded file (PDF or Image) into a list of
+    Base64-encoded image parts for the multimodal AI prompt.
     """
+    imageParts = []
+    
     if fileType == "application/pdf":
         try:
             with fitz.open(stream=fileBytes, filetype="pdf") as doc:
-                page = doc.load_page(0)  # Load only the first page
-                pix = page.get_pixmap(dpi=300)
-                imgBytes = pix.tobytes("png")
-                return imgBytes, "image/png"
+                
+                # --- THIS IS THE FIX: Loop through ALL pages ---
+                for pageNum in range(len(doc)):
+                    page = doc.load_page(pageNum)
+                    # Use 200 DPI as a balance for multi-page (faster, smaller)
+                    pix = page.get_pixmap(dpi=200) 
+                    imgBytes = pix.tobytes("png")
+                    imgBase64 = base64.b64encode(imgBytes).decode('utf-8')
+                    imageParts.append({
+                        "inlineData": {
+                            "mimeType": "image/png",
+                            "data": imgBase64
+                        }
+                    })
+            st.info(f"Processing {len(imageParts)} pages from the PDF...")
+            return imageParts
         except Exception as e:
             st.error(f"Error processing PDF with PyMuPDF: {e}")
-            return None, None
+            return None
             
     elif fileType.startswith("image/"):
         try:
-            # Convert to PNG to ensure consistency
+            # This is an image, just convert it
             with io.BytesIO(fileBytes) as f:
                 img = Image.open(f)
                 with io.BytesIO() as output:
                     img.save(output, format="PNG")
-                    return output.getvalue(), "image/png"
+                    imgBytes = output.getvalue()
+                    imgBase64 = base64.b64encode(imgBytes).decode('utf-8')
+                    imageParts.append({
+                        "inlineData": {
+                            "mimeType": "image/png",
+                            "data": imgBase64
+                        }
+                    })
+                    return imageParts
         except Exception as e:
             st.error(f"Error processing image with PIL: {e}")
-            return None, None
+            return None
             
-    return None, None
+    return None
 
 async def parseInvoiceMultimodal(fileBytes, fileType):
     """
-    Calls the Gemini API to parse the invoice *image*
+    Calls the Gemini API to parse the invoice *image(s)*
     using a multimodal prompt and a structured JSON schema.
     """
     
-    # Convert PDF or Image to a single PNG byte stream
-    imageBytes, imageMimeType = convertFileToImageBytes(fileBytes, fileType)
+    # --- CHANGE: Call the new helper function ---
+    imagePartsList = _convertFileToImageParts(fileBytes, fileType)
     
-    if not imageBytes:
+    if not imagePartsList:
         st.error("Could not convert file to a processable image.")
-        return {}
+        return {} # Return empty dict on failure
 
-    # 1. Base64-encode the image
-    imageBase64 = base64.b64encode(imageBytes).decode('utf-8')
+    # 1. Base64-encoding is already done by the helper
 
-    # 2. Update the system prompt to reflect we are looking at an image
+    # --- CHANGE: Updated system prompt for multi-page ---
     systemPrompt = """
     You are an expert AI assistant for processing Indian tax invoices.
-    You are looking at an *image* of an invoice.
-    Your task is to extract specific fields from the image.
+    You are looking at *one or more images* that make up a single invoice document.
+    Your task is to extract specific fields from the *entire document*.
+    Line items may be on page 1 and totals on the last page. Please combine them.
+    
     - Reconstruct the 64-character IRN. It might be split across lines.
-    - Find the 15-digit GSTIN (e.g., 27ABCDE1234F1Z5).
-    - Find all unique HSN or SAC codes (they are 4, 6, or 8 digits).
+    - Find the 15-digit GSTIN.
+    - Find all line items (description, hsnSac, quantity, unitPrice) from *all pages*.
     - Find the final total amount (e.g., 'Grand Total' or 'Amount Due').
+    - Find the amount (Not percentage) of SGST, CGST, IGST, UTGST and Cess.
     - Return ONLY the JSON object as specified in the schema.
     If a value is not found, return null for that field.
+    It is possible that some of these fields are fraudulent. For example, if you do not find GSTIN, do not make one up. Report as null.
 
     Additional tasks - 
     An irn code only has a-f (lowercase) and 0-9. If you recieve the following characters, convert them to their respective replacements.
@@ -110,33 +135,44 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
     "H" - 8
     """
 
-    # 3. Create the user prompt (now with an image)
+    # --- CHANGE: Create a prompt that includes ALL image parts ---
     userPromptParts = [
         {
-            "text": "Please extract the required fields from this invoice image."
-        },
-        {
-            "inlineData": {
-                "mimeType": imageMimeType,
-                "data": imageBase64
-            }
+            "text": "Please extract the required fields from this invoice document. The document consists of the following page(s):"
         }
     ]
+    # Add all the image parts (pages) to the prompt
+    userPromptParts.extend(imagePartsList)
+    # --- END CHANGE ---
 
     # 4. Define the exact JSON structure we want the AI to return
     responseSchema = {
-        "type": "OBJECT",
-        "properties": {
-            "gstNumber": {"type": "STRING", "description": "The 15-digit GSTIN."},
-            "totalAmountStr": {"type": "STRING", "description": "The final total amount as a string (e..g, '5,123.50')."},
-            "irn": {"type": "STRING", "description": "The 64-character Invoice Reference Number (IRN)."},
-            "hsnSacCodes": {
-                "type": "ARRAY",
-                "items": {"type": "STRING"},
-                "description": "A list of unique HSN or SAC codes."
+    "type": "OBJECT",
+    "properties": {
+        "gstNumber": {"type": "STRING", "description": "The 15-digit GSTIN."},
+        "irn": {"type": "STRING", "description": "The 64-character Invoice Reference Number (IRN)."},
+        "lineItems": {
+            "type": "ARRAY",
+            "description": "A list of all items/services from the invoice.",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "description": {"type": "STRING", "description": "The item/service name or description."},
+                    "hsnSac": {"type": "STRING", "description": "The HSN or SAC code for the item."},
+                    "quantity": {"type": "NUMBER", "description": "The quantity of the item."},
+                    "unitPrice": {"type": "NUMBER", "description": "The price per unit of the item."}
+                },
+                "propertyOrdering": ["description", "hsnSac", "quantity", "unitPrice"]
             }
         },
-        "propertyOrdering": ["gstNumber", "totalAmountStr", "irn", "hsnSacCodes"]
+        "sgstAmount": {"type": "STRING", "description": "The total *amount* (not percentage) of SGST. Return null if not present."},
+        "cgstAmount": {"type": "STRING", "description": "The total *amount* (not percentage) of CGST. Return null if not present."},
+        "igstAmount": {"type": "STRING", "description": "The total *amount* (not percentage) of IGST. Return null if not present."},
+        "utgstAmount": {"type": "STRING","description": "The total *amount* (not percentage) of UTGST. Return null if not present."},
+        "cessAmount": {"type": "STRING", "description": "The total *amount* (not percentage) of Cess. Return null if not present."},
+        "totalAmountStr": {"type": "STRING", "description": "The final total amount (e.g., 'Grand Total' or 'Amount Due')."}
+    },
+     "propertyOrdering": ["gstNumber", "irn", "lineItems", "sgstAmount", "cgstAmount", "igstAmount", "utgstAmount", "cessAmount", "totalAmountStr"]
     }
     
     # 5. This is the payload for the API call
@@ -171,10 +207,16 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
 
     except Exception as e:
         st.error(f"Failed to parse invoice with AI: {e}")
+        # Return a more complete empty structure
         return {
             "gstNumber": None,
-            "totalAmountStr": None,
             "irn": None,
-            "hsnSacCodes": [],
+            "lineItems": [],
+            "sgstAmount": None,
+            "cgstAmount": None,
+            "igstAmount": None,
+            "utgstAmount": None,
+            "cessAmount": None,
+            "totalAmountStr": None,
             "totalAmountFloat": None
         }
