@@ -3,7 +3,7 @@ import os
 import json
 import streamlit as st
 
-# Define the headers based on ALL fields in parsedData
+# --- UPDATED: Added invoiceNumber and vendorName to headers ---
 CSV_HEADERS = [
     "invoiceNumber",
     "date",
@@ -28,10 +28,9 @@ def saveToCSV(data, filename="params.csv"):
     Creates the file and writes headers if it doesn't exist.
     """
     try:
-        # Check if file exists to determine if we need to write headers
         fileExists = os.path.isfile(filename)
         
-        # Prepare the data row as a dictionary
+        # --- UPDATED: Added invoiceNumber and vendorName to row_data ---
         row_data = {
             "invoiceNumber": data.get("invoiceNumber"),
             "date": data.get("date"),
@@ -51,13 +50,12 @@ def saveToCSV(data, filename="params.csv"):
         }
 
         with open(filename, 'a', newline='', encoding='utf-8') as f:
-            # Use DictWriter to map our dictionary to the CSV columns
             writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
             
             if not fileExists:
-                writer.writeheader() # Write headers only if file is new
+                writer.writeheader() 
                 
-            writer.writerow(row_data) # Append the new data row
+            writer.writerow(row_data) 
         
         # This message is optional, you can comment it out
         st.success(f"Successfully appended data to {filename}")

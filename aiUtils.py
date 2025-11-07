@@ -19,7 +19,6 @@ async def fetchFromGemini(payload):
     maxRetries = 5
     delay = 1  # Initial delay in seconds
 
-    # --- CHANGE: Increased timeout for larger multi-page files ---
     async with httpx.AsyncClient(timeout=120.0) as client:
         for attempt in range(maxRetries):
             try:
@@ -71,7 +70,8 @@ def _convertFileToImageParts(fileBytes, fileType):
             st.error(f"Error processing PDF with PyMuPDF: {e}")
             return None
             
-    elif fileType.startswith("image/"):
+    # --- THIS NOW HANDLES TIFF CORRECTLY ---
+    elif fileType.startswith("image/"): 
         try:
             with io.BytesIO(fileBytes) as f:
                 img = Image.open(f)
@@ -175,7 +175,7 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
         "totalDiscount": {"type": "STRING", "description": "Discount applied over the whole, separate from the individual discounts. Return null if not present."},
         "totalAmountStr": {"type": "STRING", "description": "The final total amount (e.g., 'Grand Total' or 'Amount Due')."}
     },
-    # --- CRITICAL FIX: Added COMMA after "vendorName" ---
+    # --- ADDED invoiceNumber and vendorName here ---
     "propertyOrdering": [
         "gstNumber", "invoiceNumber", "irn", "date", "vendorName", "lineItems", 
         "sgstAmount", "cgstAmount", "igstAmount", "utgstAmount", "cessAmount", 
@@ -210,7 +210,7 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
 
     except Exception as e:
         st.error(f"Failed to parse invoice with AI: {e}")
-        # --- CRITICAL FIX: Added new fields to the empty structure ---
+        # --- ADDED invoiceNumber and vendorName to the empty structure ---
         return {
             "gstNumber": None,
             "invoiceNumber": None,
