@@ -1,0 +1,2 @@
+invoiceNumber,date,vendorName,gstNumber,irn,lineItems,sgstAmount,cgstAmount,igstAmount,utgstAmount,cessAmount,freightAndDelivery,totalDiscount,totalAmountStr,totalAmountFloat
+25-26/UTNSI/2389,18-10-2025,UTTAM TOOLS,06AAPPT4799L1ZK,4b07cafedf34dbb1ce12bd97e44a015a5639f8b5100b9d113d565831328f26a,"[{""description"": ""SC REAMER DIA 2.54 X 20FL X 60 X SH DIA 4-6521360167"", ""hsnSac"": ""82076010"", ""quantity"": 10.0, ""unitPrice"": 1500.0, ""GST"": 2700.0, ""Discount"": 0.0}]",0.00,0.00,"2,700.00",0.00,0.00,0.00,0.00,"17,700.00",17700.0
