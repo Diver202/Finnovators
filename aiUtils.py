@@ -42,7 +42,7 @@ async def fetchFromGemini(payload):
                 st.error(f"Raw response: {result}")
                 return "{}"
 
-# --- CHANGE: This function is now internal and returns a LIST of image parts ---
+# --- This function is now internal and returns a LIST of image parts ---
 def _convertFileToImageParts(fileBytes, fileType):
     """
     Converts an uploaded file (PDF or Image) into a list of
@@ -54,10 +54,8 @@ def _convertFileToImageParts(fileBytes, fileType):
         try:
             with fitz.open(stream=fileBytes, filetype="pdf") as doc:
                 
-                # --- THIS IS THE FIX: Loop through ALL pages ---
                 for pageNum in range(len(doc)):
                     page = doc.load_page(pageNum)
-                    # Use 200 DPI as a balance for multi-page (faster, smaller)
                     pix = page.get_pixmap(dpi=200) 
                     imgBytes = pix.tobytes("png")
                     imgBase64 = base64.b64encode(imgBytes).decode('utf-8')
@@ -67,7 +65,7 @@ def _convertFileToImageParts(fileBytes, fileType):
                             "data": imgBase64
                         }
                     })
-            st.info(f"Processing {len(imageParts)} pages from the PDF...")
+                st.info(f"Processing {len(imageParts)} pages from the PDF...")
             return imageParts
         except Exception as e:
             st.error(f"Error processing PDF with PyMuPDF: {e}")
@@ -75,7 +73,6 @@ def _convertFileToImageParts(fileBytes, fileType):
             
     elif fileType.startswith("image/"):
         try:
-            # This is an image, just convert it
             with io.BytesIO(fileBytes) as f:
                 img = Image.open(f)
                 with io.BytesIO() as output:
@@ -101,16 +98,13 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
     using a multimodal prompt and a structured JSON schema.
     """
     
-    # --- CHANGE: Call the new helper function ---
     imagePartsList = _convertFileToImageParts(fileBytes, fileType)
     
     if not imagePartsList:
         st.error("Could not convert file to a processable image.")
         return {} # Return empty dict on failure
 
-    # 1. Base64-encoding is already done by the helper
-
-    # --- CHANGE: Updated system prompt for multi-page ---
+    # --- Updated system prompt for new fields ---
     systemPrompt = """
     You are an expert AI assistant for processing Indian tax invoices.
     You are looking at *one or more images* that make up a single invoice document.
@@ -120,10 +114,11 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
     - Reconstruct the 64-character IRN. It might be split across lines.
     - Find the 15-digit GSTIN.
     - Find the INVOICE date in DD-MM-YYYY format
-    - Find all line items (description, hsnSac, quantity, unitPrice) from *all pages*.
+    - Find all line items (description, hsnSac, quantity, unitPrice, GST per item (total sum of CGST IGST etc.), Discount per item) from *all pages*.
     - Find the final total amount (e.g., 'Grand Total' or 'Amount Due').
-    - Find the amount (Not percentage) of SGST, CGST, IGST, UTGST and Cess.
-    - Search for the current market rates of every item. For example, petrol can be 90 - 110 Rs/L
+    - Find the total amount (Not percentage) of SGST, CGST, IGST, UTGST and Cess.
+    - Find the amount spent on freight or delivery.
+    - Find the amount of total discount, separate from the discounts over each individual item. If no item has individual discount, but the whole order has discount, it goes here.
     - Return ONLY the JSON object as specified in the schema.
     If a value is not found, return null for that field.
     It is possible that some of these fields are fraudulent. For example, if you do not find GSTIN, do not make one up. Report as null.
@@ -137,17 +132,14 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
     "H" - 8
     """
 
-    # --- CHANGE: Create a prompt that includes ALL image parts ---
     userPromptParts = [
         {
             "text": "Please extract the required fields from this invoice document. The document consists of the following page(s):"
         }
     ]
-    # Add all the image parts (pages) to the prompt
     userPromptParts.extend(imagePartsList)
-    # --- END CHANGE ---
 
-    # 4. Define the exact JSON structure we want the AI to return
+    # --- Updated responseSchema with new fields and TYPO FIX ---
     responseSchema = {
     "type": "OBJECT",
     "properties": {
@@ -163,9 +155,12 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
                     "description": {"type": "STRING", "description": "The item/service name or description."},
                     "hsnSac": {"type": "STRING", "description": "The HSN or SAC code for the item."},
                     "quantity": {"type": "NUMBER", "description": "The quantity of the item."},
-                    "unitPrice": {"type": "NUMBER", "description": "The price per unit of the item."}
+                    "unitPrice": {"type": "NUMBER", "description": "The price per unit of the item."},
+                    "GST":{"type": "NUMBER", "description": "Total GST per item, if given."},
+                    # --- CRITICAL FIX: Changed "Discount" to "NUMBER" ---
+                    "Discount": {"type": "NUMBER", "description": "Discount per item, if given."}
                 },
-                "propertyOrdering": ["description", "hsnSac", "quantity", "unitPrice"]
+                "propertyOrdering": ["description", "hsnSac", "quantity", "unitPrice", "GST", "Discount"]
             }
         },
         "sgstAmount": {"type": "STRING", "description": "The total *amount* (not percentage) of SGST. Return null if not present."},
@@ -173,16 +168,21 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
         "igstAmount": {"type": "STRING", "description": "The total *amount* (not percentage) of IGST. Return null if not present."},
         "utgstAmount": {"type": "STRING","description": "The total *amount* (not percentage) of UTGST. Return null if not present."},
         "cessAmount": {"type": "STRING", "description": "The total *amount* (not percentage) of Cess. Return null if not present."},
+        "freightAndDelivery": {"type": "STRING", "description": "The extra amount, usually given under freight or delivery charges. Return null if not present."},
+        "totalDiscount": {"type": "STRING", "description": "Discount applied over the whole, separate from the individual discounts. Return null if not present."},
         "totalAmountStr": {"type": "STRING", "description": "The final total amount (e.g., 'Grand Total' or 'Amount Due')."}
     },
-     "propertyOrdering": ["gstNumber", "irn", "date", "lineItems", "sgstAmount", "cgstAmount", "igstAmount", "utgstAmount", "cessAmount", "totalAmountStr"]
+    # --- CRITICAL FIX: Added new fields to propertyOrdering ---
+    "propertyOrdering": [
+        "gstNumber", "irn", "date", "lineItems", 
+        "sgstAmount", "cgstAmount", "igstAmount", "utgstAmount", "cessAmount", 
+        "freightAndDelivery", "totalDiscount", "totalAmountStr"
+        ]
     }
     
-    # 5. This is the payload for the API call
     payload = {
         "contents": [{"parts": userPromptParts}],
         "systemInstruction": {"parts": [{"text": systemPrompt}]},
-        # "tools": [{"google_search": {}}],
         "generationConfig": {
             "responseMimeType": "application/json",
             "responseSchema": responseSchema
@@ -190,16 +190,12 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
     }
 
     try:
-        # Call the API helper function
         jsonText = await fetchFromGemini(payload)
-        
-        # Parse the JSON string into a Python dictionary
         data = json.loads(jsonText)
         
-        # Post-processing: Convert the total string to a float for calculations
+        # Post-processing
         if data.get("totalAmountStr"):
             try:
-                # Clean up the string (remove commas, currency symbols)
                 cleanedStr = re.sub(r'[₹$,]', '', data["totalAmountStr"])
                 data["totalAmountFloat"] = float(cleanedStr)
             except (ValueError, TypeError):
@@ -222,6 +218,8 @@ async def parseInvoiceMultimodal(fileBytes, fileType):
             "igstAmount": None,
             "utgstAmount": None,
             "cessAmount": None,
+            "freightAndDelivery": None,
+            "totalDiscount": None,
             "totalAmountStr": None,
             "totalAmountFloat": None
         }

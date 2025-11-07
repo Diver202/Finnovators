@@ -1,10 +1,12 @@
 import streamlit as st
 import asyncio
 
-# Import all the functions from our new, separated utility files
+# Import all the functions from our utility files
 from aiUtils import parseInvoiceMultimodal
 from validationUtils import performDiscrepancyChecks
 from saveJaison import saveJaisonToFile
+# --- NEW: Import the HSN validator ---
+from HSNSACValidate import validateHSNRates
 
 
 # --- Streamlit App UI (Must be async) ---
@@ -36,20 +38,40 @@ async def main():
                 parsedData = await parseInvoiceMultimodal(fileBytes, fileType)
             
             if parsedData:
+                # We can save this immediately
                 saveJaisonToFile(parsedData, uploadedFile.name)
             st.json(parsedData)
             
         with col2:
-            st.subheader("Validation & Discrepancy Report (Step 2: Validation)")
+            st.subheader("Validation & Discrepancy Report")
             # Check if parsedData is not empty
             if parsedData:
-                # This now only passes 'parsedData' as rawText no longer exists
-                findings = await performDiscrepancyChecks(parsedData)
+                # --- Step 2: Run internal and GSTIN checks ---
+                st.write("**(Step 2: Validation)**")
+                with st.spinner("Running math checks & verifying GSTIN online..."):
+                    findings = await performDiscrepancyChecks(parsedData)
+                    
+                    for i in range(0, len(findings), 2):
+                        messageTypeFunc = findings[i]
+                        message = findings[i+1]
+                        messageTypeFunc(message)
                 
-                for i in range(0, len(findings), 2):
-                    messageTypeFunc = findings[i]
-                    message = findings[i+1]
-                    messageTypeFunc(message) 
+                st.divider() # Add a separator
+
+                # --- Step 3: Run the new HSN web check ---
+                st.write("**(Step 3: HSN/SAC Rate Verification)**")
+                with st.spinner("Cross-referencing HSN rates with live web data..."):
+                    hsn_findings = await validateHSNRates(parsedData)
+                    
+                    if not hsn_findings:
+                        st.info("No HSN/SAC codes were found to validate online.")
+                    
+                    # Display the new findings
+                    for i in range(0, len(hsn_findings), 2):
+                        messageTypeFunc = hsn_findings[i]
+                        message = hsn_findings[i+1]
+                        messageTypeFunc(message)
+                        
             else:
                 st.error("Could not extract any data from the uploaded file.")
 

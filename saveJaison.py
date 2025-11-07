@@ -10,7 +10,7 @@ def saveJaisonToFile(data, originalFilename, outputFolder="extractedJSON\parsed"
             os.makedirs(outputFolder)
 
         baseName = os.path.splitext(originalFilename)[0]
-        jsonFilename = f"{baseName}json"
+        jsonFilename = f"{baseName}.json"
 
         filePath = os.path.join(outputFolder, jsonFilename)
 

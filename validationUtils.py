@@ -4,7 +4,7 @@ import httpx  # Using httpx to match your async app
 import json
 import asyncio
 
-# --- HELPER FUNCTION (Unchanged from your file) ---
+# --- HELPER FUNCTION (Unchanged) ---
 def _cleanAndConvertToFloat(value):
     """
     Cleans and converts a currency string to a float.
@@ -21,11 +21,10 @@ def _cleanAndConvertToFloat(value):
     except (ValueError, TypeError):
         return 0.0
 
-# --- YOUR PARTNER'S FUNCTIONS (Rewritten as async) ---
+# --- GSTIN Functions (Unchanged) ---
 
 async def fetch_gstin_details(gstin):
     """
-    Your partner's function, rewritten to be async.
     Calls the RapidAPI to get GSTIN details.
     """
     try:
@@ -48,35 +47,31 @@ async def fetch_gstin_details(gstin):
 
 async def is_valid_gstin(gstin):
     """
-    Your partner's function, rewritten to be async.
-    This is the direct replacement for the mock function.
+    Validates GSTIN using the fetched details.
     """
-    # Call the other async function
     json_data = await fetch_gstin_details(gstin)
     
-    # Handle the 'list' vs 'dict' bug
     if isinstance(json_data, list) and json_data:
-        json_data = json_data[0] # Grab first item if it's a list
+        json_data = json_data[0] 
     elif not isinstance(json_data, dict):
         return {"success": False, "message": "Invalid API response format."}
 
-    # This is your partner's original logic
     if json_data.get("success", False) is True:
         return {"success": True, "message": "GSTIN is valid."}
     else:
         return {"success": False, "message": json_data.get("message", "GSTIN is invalid or API failed.")}
 
-# --- Main Validation Function (Modified to use your functions) ---
+# --- Main Validation Function ---
 
 async def performDiscrepancyChecks(data):
     """
-    Generates a list of findings based on extracted data.
-    This now calls your partner's 'is_valid_gstin' function.
+    Generates a list of findings based on extracted data,
+    now including discounts and freight.
     """
     findings = []
     tolerance = 1.0  # Allow for a 1 Rupee rounding error
     
-    # --- Check 1: REAL GST Number Verification ---
+    # --- Check 1: REAL GST Number Verification (Unchanged) ---
     gstNumber = data.get("gstNumber")
     
     if not gstNumber:
@@ -84,29 +79,32 @@ async def performDiscrepancyChecks(data):
         findings.append("No GST number found in invoice.")
     else:
         with st.spinner(f"Verifying GSTIN {gstNumber} online..."):
-            # Call your partner's function
             gstCheck = await is_valid_gstin(gstNumber)
-        
-        # This is the simplified check you wanted
-        if gstCheck.get("success") is True:
-            findings.append(st.success)
-            findings.append(f"GSTIN {gstNumber} is valid.")
-        else:
-            findings.append(st.error)
-            findings.append(f"GSTIN Invalid: {gstCheck.get('message', 'Check failed.')}")
+      
+            if gstCheck.get("success") is True:
+                findings.append(st.success)
+                findings.append(f"GSTIN {gstNumber} is valid.")
+            else:
+                findings.append(st.error)
+                findings.append(f"GSTIN Invalid: {gstCheck.get('message', 'Check failed.')}")
 
     
-    # --- Check 2: Full Mathematical Validation (Unchanged) ---
+    # --- Check 2: Full Mathematical Validation (FIXED) ---
     
     totalAmount = _cleanAndConvertToFloat(data.get("totalAmountStr"))
     lineItems = data.get("lineItems")
+    
     calculatedSubtotal = 0.0
+    totalItemDiscounts = 0.0
     itemsAreValid = True
 
     if lineItems and isinstance(lineItems, list):
         for item in lineItems:
             quantity = _cleanAndConvertToFloat(item.get("quantity"))
             unitPrice = _cleanAndConvertToFloat(item.get("unitPrice"))
+            itemDiscount = _cleanAndConvertToFloat(item.get("Discount"))
+            
+            totalItemDiscounts += itemDiscount
             
             if quantity > 0 and unitPrice > 0:
                 calculatedSubtotal += quantity * unitPrice
@@ -117,27 +115,54 @@ async def performDiscrepancyChecks(data):
     else:
         findings.append(st.info)
         findings.append("No line items found to calculate subtotal from.")
-        itemsAreValid = False # Can't do the math check
+        itemsAreValid = False
     
+    # Get all other financial components
     sgst = _cleanAndConvertToFloat(data.get("sgstAmount"))
     cgst = _cleanAndConvertToFloat(data.get("cgstAmount"))
     igst = _cleanAndConvertToFloat(data.get("igstAmount"))
     utgst = _cleanAndConvertToFloat(data.get("utgstAmount"))
     cess = _cleanAndConvertToFloat(data.get("cessAmount"))
-    totalTaxes = sgst + cgst + igst + utgst + cess
+    freight = _cleanAndConvertToFloat(data.get("freightAndDelivery"))
+    overallDiscount = _cleanAndConvertToFloat(data.get("totalDiscount"))
 
-    if totalAmount is not None and totalAmount > 0 and itemsAreValid:
-        calculatedGrandTotal = calculatedSubtotal + totalTaxes
+    # Sum of total-level taxes (item-level GST is checked in HSN validator)
+    totalTaxes = sgst + cgst + igst + utgst
+
+    if totalAmount > 0 and itemsAreValid:
+        
+        calculatedGrandTotal = (
+            calculatedSubtotal - totalItemDiscounts - overallDiscount
+        ) + totalTaxes + freight + cess
+        
         discrepancy = abs(calculatedGrandTotal - totalAmount)
 
+        math_summary = (
+            f"Line Items (₹{calculatedSubtotal:.2f}) "
+            f"- Item Discounts (₹{totalItemDiscounts:.2f}) "
+            f"- Total Discount (₹{overallDiscount:.2f}) "
+            f"+ Total Taxes (₹{totalTaxes:.2f}) "
+            f"+ Freight (₹{freight:.2f}) "
+            f"+ Cess (₹{cess:.2f}) "
+            f"= ₹{calculatedGrandTotal:.2f}"
+        )
+
+        # --- THIS IS THE FIX ---
         if discrepancy > tolerance:
             findings.append(st.error)
-            findings.append(f"Total Amount Mismatch (High Fraud Risk): Line Items (₹{calculatedSubtotal:.2f}) + Total Taxes (₹{totalTaxes:.2f}) = ₹{calculatedGrandTotal:.2f}. This does not match the Grand Total (₹{totalAmount:.2f}). Discrepancy: ₹{discrepancy:.2f}")
+            findings.append(f"Total Amount Mismatch (High Fraud Risk):")
+            findings.append(st.error) # <-- Add function for each line
+            findings.append(math_summary)
+            findings.append(st.error) # <-- Add function for each line
+            findings.append(f"This does not match the Grand Total (₹{totalAmount:.2f}). Discrepancy: ₹{discrepancy:.2f}")
         else:
             findings.append(st.success)
-            findings.append(f"Grand Total Verified: Line Items (₹{calculatedSubtotal:.2f}) + Taxes (₹{totalTaxes:.2f}) = ₹{calculatedGrandTotal:.2f}, which matches the Grand Total.")
+            findings.append(f"Grand Total Verified:")
+            findings.append(st.success) # <-- Add function for each line
+            findings.append(math_summary)
+        # --- END OF FIX ---
             
-    elif totalAmount is None or totalAmount == 0:
+    elif totalAmount == 0:
         findings.append(st.error)
         findings.append("Total Amount could not be found. Cannot perform final math check.")
     elif not itemsAreValid:
