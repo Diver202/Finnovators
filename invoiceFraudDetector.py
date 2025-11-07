@@ -41,7 +41,7 @@ async def main():
             # Check if parsedData is not empty
             if parsedData:
                 # This now only passes 'parsedData' as rawText no longer exists
-                findings = performDiscrepancyChecks(parsedData)
+                findings = await performDiscrepancyChecks(parsedData)
                 
                 for i in range(0, len(findings), 2):
                     messageTypeFunc = findings[i]

@@ -1,7 +1,10 @@
 import streamlit as st
 import re
+import httpx  # Using httpx to match your async app
+import json
+import asyncio
 
-# --- HELPER FUNCTION ---
+# --- HELPER FUNCTION (Unchanged from your file) ---
 def _cleanAndConvertToFloat(value):
     """
     Cleans and converts a currency string to a float.
@@ -18,61 +21,90 @@ def _cleanAndConvertToFloat(value):
     except (ValueError, TypeError):
         return 0.0
 
-# --- Validation Functions ---
+# --- YOUR PARTNER'S FUNCTIONS (Rewritten as async) ---
 
-def mockVerifyGstNumber(gstNumber):
+async def fetch_gstin_details(gstin):
     """
-    Simulates a check against a GST database.
+    Your partner's function, rewritten to be async.
+    Calls the RapidAPI to get GSTIN details.
     """
-    if not gstNumber:
-        return {"status": "Missing", "message": "No GST number found in invoice."}
-
-    knownFraudulentGsts = ["27ABCDE1234F1Z5", "29AAAAA0000A1Z9"]
-    validGstsDb = {
-        "36AAIFP1234A1Z2": {"name": "Genuine Tech Solutions", "status": "Active"},
-        "27AACCT5678F1Z6": {"name": "Reliable Goods Co.", "status": "Active"}
-    }
-    
-    if gstNumber in knownFraudulentGsts:
-        return {"status": "Fraudulent", "message": f"GSTIN {gstNumber} is on a known fraud list."}
-    
-    if gstNumber in validGstsDb:
-        return {"status": "Verified", "message": f"GSTIN {gstNumber} is valid and belongs to '{validGstsDb[gstNumber]['name']}'."}
+    try:
+        headers = {
+            'x-rapidapi-key': "af6a58c474msh65744a06169c380p137bc4jsn43d1dfed9fa0",
+            'x-rapidapi-host': "gst-insights-api.p.rapidapi.com"
+        }
+        endpoint = f"https://gst-insights-api.p.rapidapi.com/getGSTDetailsUsingGST/{gstin}"
         
-    return {"status": "Unverified", "message": f"GSTIN {gstNumber} could not be verified against the portal. (May be new or invalid)."}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.get(endpoint, headers=headers)
+            res.raise_for_status()
+            return res.json()
 
-def performDiscrepancyChecks(data):
+    except httpx.HTTPStatusError as e:
+        try: return e.response.json()
+        except: return {"success": False, "message": f"API Error: Status {e.response.status_code}"}
+    except Exception as e:
+        return {"success": False, "message": f"API call failed: {e}"}
+
+async def is_valid_gstin(gstin):
     """
-    Generates a list of findings based on extracted data,
-    including mathematical validation as requested.
+    Your partner's function, rewritten to be async.
+    This is the direct replacement for the mock function.
+    """
+    # Call the other async function
+    json_data = await fetch_gstin_details(gstin)
+    
+    # Handle the 'list' vs 'dict' bug
+    if isinstance(json_data, list) and json_data:
+        json_data = json_data[0] # Grab first item if it's a list
+    elif not isinstance(json_data, dict):
+        return {"success": False, "message": "Invalid API response format."}
+
+    # This is your partner's original logic
+    if json_data.get("success", False) is True:
+        return {"success": True, "message": "GSTIN is valid."}
+    else:
+        return {"success": False, "message": json_data.get("message", "GSTIN is invalid or API failed.")}
+
+# --- Main Validation Function (Modified to use your functions) ---
+
+async def performDiscrepancyChecks(data):
+    """
+    Generates a list of findings based on extracted data.
+    This now calls your partner's 'is_valid_gstin' function.
     """
     findings = []
     tolerance = 1.0  # Allow for a 1 Rupee rounding error
     
-    # --- Check 1: GST Number Verification ---
-    gstCheck = mockVerifyGstNumber(data.get("gstNumber"))
+    # --- Check 1: REAL GST Number Verification ---
+    gstNumber = data.get("gstNumber")
     
-    if gstCheck["status"] == "Verified":
-        findings.append(st.success)
-    elif gstCheck["status"] in ["Fraudulent", "Missing"]:
+    if not gstNumber:
         findings.append(st.error)
-    else: # Unverified
-        findings.append(st.warning)
+        findings.append("No GST number found in invoice.")
+    else:
+        with st.spinner(f"Verifying GSTIN {gstNumber} online..."):
+            # Call your partner's function
+            gstCheck = await is_valid_gstin(gstNumber)
+        
+        # This is the simplified check you wanted
+        if gstCheck.get("success") is True:
+            findings.append(st.success)
+            findings.append(f"GSTIN {gstNumber} is valid.")
+        else:
+            findings.append(st.error)
+            findings.append(f"GSTIN Invalid: {gstCheck.get('message', 'Check failed.')}")
+
     
-    findings.append(gstCheck["message"])
+    # --- Check 2: Full Mathematical Validation (Unchanged) ---
     
-    # --- Check 2: Full Mathematical Validation (Line Items + Taxes = Total) ---
-    
-    # --- FIX: Use the helper to get float from totalAmountStr ---
     totalAmount = _cleanAndConvertToFloat(data.get("totalAmountStr"))
     lineItems = data.get("lineItems")
     calculatedSubtotal = 0.0
     itemsAreValid = True
 
-    # Step A: Calculate subtotal from line items
     if lineItems and isinstance(lineItems, list):
         for item in lineItems:
-            # We can use the helper here too for robustness
             quantity = _cleanAndConvertToFloat(item.get("quantity"))
             unitPrice = _cleanAndConvertToFloat(item.get("unitPrice"))
             
@@ -87,7 +119,6 @@ def performDiscrepancyChecks(data):
         findings.append("No line items found to calculate subtotal from.")
         itemsAreValid = False # Can't do the math check
     
-    # --- FIX: Use helper to get floats from original string fields ---
     sgst = _cleanAndConvertToFloat(data.get("sgstAmount"))
     cgst = _cleanAndConvertToFloat(data.get("cgstAmount"))
     igst = _cleanAndConvertToFloat(data.get("igstAmount"))
@@ -95,15 +126,13 @@ def performDiscrepancyChecks(data):
     cess = _cleanAndConvertToFloat(data.get("cessAmount"))
     totalTaxes = sgst + cgst + igst + utgst + cess
 
-    # Step C: Compare
-    # Check if totalAmount is a valid number
     if totalAmount is not None and totalAmount > 0 and itemsAreValid:
         calculatedGrandTotal = calculatedSubtotal + totalTaxes
         discrepancy = abs(calculatedGrandTotal - totalAmount)
 
         if discrepancy > tolerance:
             findings.append(st.error)
-            findings.append(f"Total Amount Mismatch (High Fraud Risk): Line Items (₹{calculatedSubtotal:.2f}) + Total Taxes (₹{totalTaxes:.2f}) = ₹{calculatedGrandTotal:.2f}. This does not match the Grand Total (₹{totalAmount:.2f}). Discrepancy: ₹{discrepancy:.2f}")
+            findings.append(f"Total Amount Mismatch (High Fraud Risk): Line Items (₹{calculatedSubtotal:.2f}) + Total Taxes (₹{totalTTaxes:.2f}) = ₹{calculatedGrandTotal:.2f}. This does not match the Grand Total (₹{totalAmount:.2f}). Discrepancy: ₹{discrepancy:.2f}")
         else:
             findings.append(st.success)
             findings.append(f"Grand Total Verified: Line Items (₹{calculatedSubtotal:.2f}) + Taxes (₹{totalTaxes:.2f}) = ₹{calculatedGrandTotal:.2f}, which matches the Grand Total.")
@@ -115,7 +144,7 @@ def performDiscrepancyChecks(data):
         findings.append(st.warning)
         findings.append("Could not perform final math check because line item data was incomplete or missing.")
     
-    # --- Check 3: IRN Presence ---
+    # --- Check 3: IRN Presence (Unchanged) ---
     if data.get("irn"):
         findings.append(st.success)
         findings.append(f"IRN found: {data['irn'][:10]}...") # Show snippet
@@ -123,9 +152,8 @@ def performDiscrepancyChecks(data):
         findings.append(st.warning)
         findings.append("IRN was not found on the invoice.")
 
-    # --- FIX: Check 4: HSN/SAC Presence (from line items) ---
+    # --- Check 4: HSN/SAC Presence (Unchanged) ---
     if lineItems and isinstance(lineItems, list):
-        # Look inside lineItems for "hsnSac"
         all_hsn = [item.get("hsnSac") for item in lineItems if item.get("hsnSac")]
         if all_hsn:
             unique_hsn = set(all_hsn) # Get only unique codes
