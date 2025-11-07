@@ -29,7 +29,7 @@ async def fetch_gstin_details(gstin):
     """
     try:
         headers = {
-            'x-rapidapi-key': "af6a58c474msh65744a06169c380p137bc4jsn43d1dfed9fa0",
+            'x-rapidapi-key': st.secrets["RAPIDAPI_KEY_GSTIN"],
             'x-rapidapi-host': "gst-insights-api.p.rapidapi.com"
         }
         endpoint = f"https://gst-insights-api.p.rapidapi.com/getGSTDetailsUsingGST/{gstin}"

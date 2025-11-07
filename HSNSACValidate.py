@@ -11,7 +11,7 @@ async def _fetchHSNData(payload):
     Handles the asynchronous API call to Gemini with exponential backoff.
     This version uses the specific key for HSN validation.
     """
-    apiKey = "AIzaSyANmHzDnMk5PcyC4lkTqQ0JIkxddzaRcH4"
+    apiKey = st.secrets["GEMINI_API_KEY_HSN"]
     apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={apiKey}"
     
     headers = {"Content-Type": "application/json"}

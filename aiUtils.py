@@ -12,7 +12,7 @@ async def fetchFromGemini(payload):
     """
     Handles the asynchronous API call to Gemini with exponential backoff.
     """
-    apiKey = "AIzaSyAdnKDhhSEmycIQXO7u6AA1CPlcESElJh0"
+    apiKey = st.secrets["GEMINI_API_KEY_EXTRACT"]
     apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={apiKey}"
     
     headers = {"Content-Type": "application/json"}
