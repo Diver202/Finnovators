@@ -6,7 +6,7 @@ from email.mime.multipart import MIMEMultipart
 def send_email_report(recipient_email: str, flagged_files_log: list):
     """
     Connects to the SMTP server and sends a report to the user.
-    This is a synchronous (blocking) function.
+    Returns None on success, or an error_message string on failure.
     """
     try:
         # Get sender credentials from secrets
@@ -14,8 +14,8 @@ def send_email_report(recipient_email: str, flagged_files_log: list):
         sender_password = st.secrets["SENDER_PASSWORD"]
 
         if not sender_email or not sender_password:
-            st.error("Sender email credentials are not set in secrets.toml.")
-            return
+            # Return the error message instead of calling st.error
+            return "Sender email credentials are not set in secrets.toml."
 
         # Create the email message
         message = MIMEMultipart("alternative")
@@ -59,17 +59,18 @@ def send_email_report(recipient_email: str, flagged_files_log: list):
 
         html_body += "</div></body></html>"
 
-        # Attach the plain text and HTML parts
         message.attach(MIMEText(text_body, "plain"))
         message.attach(MIMEText(html_body, "html"))
 
         # Connect to Gmail's SMTP server
+        # This is where your "intentionally wrong input" will cause an exception
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender_email, sender_password)
             server.sendmail(sender_email, recipient_email, message.as_string())
         
-        # This message will only appear in the Streamlit UI, not the email
-        st.success(f"A report for {len(flagged_files_log)} flagged files has been sent to {recipient_email}.")
+        # If we get here, it worked. Return None for success.
+        return None
 
     except Exception as e:
-        st.error(f"Failed to send email report: {e}")
+        # If *anything* goes wrong, return the error message as a string
+        return f"Failed to send email report: {e}"

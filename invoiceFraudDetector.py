@@ -11,8 +11,8 @@ from saveJaison import saveJaisonToFile
 from HSNSACValidate import validateHSNRates
 from csvUtils import save_to_clean_csv, save_to_flagged_csv
 from duplicationValidator import run_historical_checks 
-# --- 1. FIX 1: ADD THE MISSING IMPORT ---
-from notificationManager import send_email_report 
+from notificationManager import send_email_report
+from chatbotManager import get_chatbot_response
 
 
 CUSTOM_CSS = """
@@ -126,6 +126,8 @@ async def main():
         st.session_state['user_email'] = ""
     if 'processed_data' not in st.session_state:
         st.session_state.processed_data = {}
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
 
     if not st.session_state['logged_in']:
         render_login_page()
@@ -139,7 +141,6 @@ async def main():
     )
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-    # --- Sidebar ---
     with st.sidebar:
         st.title("Processed Files")
         st.write(f"Logged in as: `{st.session_state['user_email']}`")
@@ -147,142 +148,135 @@ async def main():
             st.session_state['logged_in'] = False
             st.session_state['user_email'] = ""
             st.session_state['processed_data'] = {}
+            st.session_state.chat_history = []
             st.rerun()
             
         st.write("Select an invoice to view its detailed report.")
-        
         file_names = list(st.session_state.processed_data.keys())
-        
         selected_file = st.sidebar.radio(
             "Invoices:",
             file_names,
             label_visibility="collapsed"
         )
     
-    # --- Main content area ---
-    st.title("TrueBill AI")
+    st.title("TrueBill AI Dashboard")
+    
+    tab_processor, tab_chatbot = st.tabs(["Invoice Processor", "Chatbot"])
 
-    uploaded_files = st.file_uploader(
-        "Drag and drop a folder or select multiple files",
-        type=["pdf", "png", "jpg", "jpeg", "tif", "tiff"],
-        accept_multiple_files=True,
-        key="batch_uploader"
-    )
+    with tab_processor:
+        st.write("Upload a batch of invoices to begin processing.")
 
-    if st.button("Process All Uploaded Files", key="batch_process", use_container_width=True):
-        if not uploaded_files:
-            st.warning("Please upload files first.")
-        else:
-            # Clear state *before* processing
-            st.session_state.processed_data.clear()
-            
-            total_files = len(uploaded_files)
-            progress_bar = st.progress(0, text=f"Starting batch process... 0/{total_files}")
-            
-            flagged_files_for_email = []
+        uploaded_files = st.file_uploader(
+            "Drag and drop a folder or select multiple files",
+            type=["pdf", "png", "jpg", "jpeg", "tif", "tiff"],
+            accept_multiple_files=True,
+            key="batch_uploader"
+        )
 
-            for i, file in enumerate(uploaded_files):
-                current_file_name = file.name
-                progress_text = f"Processing {current_file_name}... ({i + 1}/{total_files})"
-                progress_bar.progress((i + 1) / total_files, text=progress_text)
-                
-                all_flags = []
-                parsed_data = {}
-                historical_findings = {} 
-                file_bytes = b""
-                file_type = "unknown"
-                
-                try:
-                    file_bytes = file.getvalue()
-                    file_type = file.type
-                    
-                    parsed_data = await parseInvoiceMultimodal(file_bytes, file_type)
-                    
-                    if not parsed_data or not (parsed_data.get("invoiceNumber") or parsed_data.get("gstNumber")):
-                        all_flags.append("Failed to parse key data (Invoice # or GSTIN).")
-                        historical_findings = {"overall_flag": "PARSE_ERROR", "reasons": all_flags}
-                    
-                    else:
-                        validation_findings = await performDiscrepancyChecks(parsed_data)
-                        for j in range(0, len(validation_findings), 2):
-                            if validation_findings[j] != st.success: 
-                                all_flags.append(validation_findings[j+1])
-
-                        hsn_findings = await validateHSNRates(parsed_data)
-                        for j in range(0, len(hsn_findings), 2):
-                            if hsn_findings[j] != st.success:
-                                all_flags.append(hsn_findings[j+1])
-
-                        historical_findings = await asyncio.to_thread(
-                            run_historical_checks, parsed_data, "params_clean.csv" 
-                        )
-                        
-                        hist_flag = historical_findings.get("overall_flag")
-                        if hist_flag != "CLEAN":
-                            all_flags.extend(historical_findings.get("reasons", ["Historical check failed."]))
-                    
-                    if not all_flags:
-                        save_to_clean_csv(parsed_data, "params_clean.csv")
-                    else:
-                        save_to_flagged_csv(parsed_data, all_flags, "params_flagged.csv")
-                        flagged_files_for_email.append({
-                            "file_name": current_file_name,
-                            "reasons": all_flags
-                        })
-                    
-                    saveJaisonToFile(parsed_data, current_file_name)
-                    
-                    # We save results for *all* files, even error ones
-                    st.session_state.processed_data[current_file_name] = {
-                        "parsed_data": parsed_data,
-                        "all_flags": all_flags,
-                        "historical_findings": historical_findings,
-                        "file_bytes": file_bytes,
-                        "file_type": file_type
-                    }
-
-                except Exception as e:
-                    st.error(f"Critical error on {current_file_name}: {e}. Skipping.")
-                    all_flags = [f"Critical error: {e}"]
-                    
-                    flagged_files_for_email.append({
-                        "file_name": current_file_name,
-                        "reasons": all_flags
-                    })
-                    
-                    st.session_state.processed_data[current_file_name] = {
-                        "parsed_data": {"error": str(e)},
-                        "all_flags": all_flags,
-                        "historical_findings": {"overall_flag": "CRITICAL_ERROR", "reasons": all_flags},
-                        "file_bytes": file_bytes, # Use the bytes we have
-                        "file_type": file_type # Use the type we have
-                    }
-            
-            # --- End of loop ---
-            progress_bar.empty()
-            st.success(f"Batch processing complete! Processed {len(st.session_state.processed_data)} files.")
-            
-            if flagged_files_for_email:
-                with st.spinner("Sending email report..."):
-                    await asyncio.to_thread(
-                        send_email_report,
-                        st.session_state['user_email'],
-                        flagged_files_for_email
-                    )
+        if st.button("Process All Uploaded Files", key="batch_process", use_container_width=True):
+            if not uploaded_files:
+                st.warning("Please upload files first.")
             else:
-                st.success("No flagged files found in this batch!")
-            
-            # --- 2. FIX 2: ADD THE RERUN CALL ---
-            # This forces Streamlit to reload the script,
-            # which makes the sidebar see the new session_state.
-            st.rerun()
+                st.session_state.processed_data.clear()
+                total_files = len(uploaded_files)
+                progress_bar = st.progress(0, text=f"Starting batch process... 0/{total_files}")
+                flagged_files_for_email = []
 
-    # --- Main Content Area (Report Display) ---
-    if st.session_state.processed_data:
-        if selected_file:
-            render_report(selected_file)
-    else:
-        st.info("Upload one or more invoice files and click 'Process All' to see the validation reports.")
+                for i, file in enumerate(uploaded_files):
+                    # ... (The entire for-loop logic is unchanged) ...
+                    current_file_name = file.name
+                    progress_text = f"Processing {current_file_name}... ({i + 1}/{total_files})"
+                    progress_bar.progress((i + 1) / total_files, text=progress_text)
+                    all_flags = []; parsed_data = {}; historical_findings = {}
+                    file_bytes = b""; file_type = "unknown"
+                    try:
+                        file_bytes = file.getvalue(); file_type = file.type
+                        parsed_data = await parseInvoiceMultimodal(file_bytes, file_type)
+                        if not parsed_data or not (parsed_data.get("invoiceNumber") or parsed_data.get("gstNumber")):
+                            all_flags.append("Failed to parse key data (Invoice # or GSTIN).")
+                            historical_findings = {"overall_flag": "PARSE_ERROR", "reasons": all_flags}
+                        else:
+                            validation_findings = await performDiscrepancyChecks(parsed_data)
+                            for j in range(0, len(validation_findings), 2):
+                                if validation_findings[j] != st.success: all_flags.append(validation_findings[j+1])
+                            hsn_findings = await validateHSNRates(parsed_data)
+                            for j in range(0, len(hsn_findings), 2):
+                                if hsn_findings[j] != st.success: all_flags.append(hsn_findings[j+1])
+                            historical_findings = await asyncio.to_thread(run_historical_checks, parsed_data, "params_clean.csv")
+                            hist_flag = historical_findings.get("overall_flag")
+                            if hist_flag != "CLEAN": all_flags.extend(historical_findings.get("reasons", ["Historical check failed."]))
+                        if not all_flags:
+                            save_to_clean_csv(parsed_data, "params_clean.csv")
+                        else:
+                            save_to_flagged_csv(parsed_data, all_flags, "params_flagged.csv")
+                            flagged_files_for_email.append({"file_name": current_file_name, "reasons": all_flags})
+                        saveJaisonToFile(parsed_data, current_file_name)
+                        st.session_state.processed_data[current_file_name] = {
+                            "parsed_data": parsed_data, "all_flags": all_flags,
+                            "historical_findings": historical_findings, "file_bytes": file_bytes, "file_type": file_type
+                        }
+                    except Exception as e:
+                        st.error(f"Critical error on {current_file_name}: {e}. Skipping.")
+                        all_flags = [f"Critical error: {e}"]
+                        flagged_files_for_email.append({"file_name": current_file_name, "reasons": all_flags})
+                        st.session_state.processed_data[current_file_name] = {
+                            "parsed_data": {"error": str(e)}, "all_flags": all_flags,
+                            "historical_findings": {"overall_flag": "CRITICAL_ERROR", "reasons": all_flags},
+                            "file_bytes": file_bytes, "file_type": file_type
+                        }
+                
+                # --- END OF LOOP ---
+                progress_bar.empty()
+                st.success(f"Batch processing complete! Processed {len(st.session_state.processed_data)} files.")
+                
+                # --- THIS IS THE FIX ---
+                if flagged_files_for_email:
+                    with st.spinner("Sending email report..."):
+                        # Capture the return value
+                        error_message = await asyncio.to_thread(
+                            send_email_report,
+                            st.session_state['user_email'],
+                            flagged_files_for_email
+                        )
+                    
+                    # Check the return value in the main thread
+                    if error_message:
+                        st.error(error_message) # This is now safe to call
+                    else:
+                        st.success(f"A report for {len(flagged_files_for_email)} flagged files has been sent to {st.session_state['user_email']}.")
+                else:
+                    st.success("No flagged files found in this batch!")
+                
+                st.rerun()
+
+        if st.session_state.processed_data:
+            if selected_file:
+                render_report(selected_file)
+        else:
+            st.info("Upload one or more invoice files and click 'Process All' to see the validation reports.")
+
+    with tab_chatbot:
+        st.subheader("Invoice Chatbot")
+        st.write("Ask questions about your recently processed invoices.")
+
+        for message in st.session_state.chat_history:
+            role = "human" if message["role"] == "user" else "ai"
+            with st.chat_message(role):
+                st.markdown(message["parts"][0]["text"])
+
+        if prompt := st.chat_input("Ask about your flagged or clean invoices..."):
+            st.session_state.chat_history.append({"role": "user", "parts": [{"text": prompt}]})
+            with st.chat_message("human"):
+                st.markdown(prompt)
+            
+            with st.spinner("TrueBill is thinking..."):
+                response_text = await get_chatbot_response(prompt, st.session_state.chat_history)
+            
+            st.session_state.chat_history.append({"role": "model", "parts": [{"text": response_text}]})
+            with st.chat_message("ai"):
+                st.markdown(response_text)
+            
+            st.rerun()
 
 if __name__ == "__main__":
     asyncio.run(main())
