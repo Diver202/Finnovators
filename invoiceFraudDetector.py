@@ -14,9 +14,10 @@ from duplicationValidator import run_historical_checks
 # --- 1. FIX 1: ADD THE MISSING IMPORT ---
 from notificationManager import send_email_report 
 
-# --- CUSTOM CSS (Unchanged) ---
+
 CUSTOM_CSS = """
 <style>
+    /* --- Main App Styles --- */
     .main { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     h1 { color: #5D9CEC; }
     h3 { color: #AAAAAA; font-style: italic; font-weight: 300; font-size: 1.1em; }
@@ -26,12 +27,37 @@ CUSTOM_CSS = """
     [data-testid="stInfo"] { background-color: #253B4A; border: 1px solid #3498DB; border-radius: 10px; box-shadow: 0 4px 15px rgba(52, 152, 219, 0.1); }
     .st-expander { border: 1px solid #333; border-radius: 10px; }
     .st-expander header { background-color: #1E1E1E; border-radius: 10px 10px 0 0; }
+
+    /* --- NEW: Login Page Styles --- */
+    .login-container {
+        background-color: #1E1E1E; /* A slightly off-black */
+        padding: 2rem 3rem;
+        border-radius: 20px;
+        border: 1px solid #333;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+        max-width: 500px;
+        margin: 4rem auto; /* Center it */
+    }
+    .login-container h2 {
+        color: #5D9CEC;
+        text-align: center;
+        font-size: 2.5rem;
+        font-weight: 600;
+        margin-bottom: -10px;
+    }
+    .login-container .stButton button {
+        background-color: #5D9CEC;
+        color: white;
+        height: 3rem;
+        font-size: 1.1rem;
+        font-weight: 600;
+    }
 </style>
 """
 
 # --- render_report function (Unchanged) ---
 def render_report(file_name):
-    
+    # ... (This function is unchanged from the last correct version) ...
     report_data = st.session_state.processed_data[file_name]
     parsed_data = report_data["parsed_data"]
     all_flags = report_data["all_flags"]
@@ -73,11 +99,11 @@ def render_report(file_name):
 def render_login_page():
     st.set_page_config(
         layout="centered", 
-        page_title="Invoice Detector Login",
+        page_title="TrueBill AI",
         page_icon=":shield:"
     )
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-    st.title("TrueBill AI")
+    st.title("Login")
     
     with st.form("login_form"):
         st.write("Please enter your email to receive batch reports.")
@@ -107,7 +133,7 @@ async def main():
 
     st.set_page_config(
         layout="wide", 
-        page_title="Invoice Fraud Detector",
+        page_title="TrueBill AI",
         page_icon=":shield:",
         initial_sidebar_state="expanded"
     )
@@ -134,7 +160,7 @@ async def main():
         )
     
     # --- Main content area ---
-    st.title("Invoice Fraud & Discrepancy Detector")
+    st.title("TrueBill AI")
 
     uploaded_files = st.file_uploader(
         "Drag and drop a folder or select multiple files",
