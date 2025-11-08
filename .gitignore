@@ -5,3 +5,5 @@
 .streamlit/
 /__pycache__/
 params.csv
+params_clean.csv
+params_flagged.csv
