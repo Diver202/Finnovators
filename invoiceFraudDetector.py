@@ -77,7 +77,7 @@ def render_login_page():
         page_icon=":shield:"
     )
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-    st.title("Invoice Fraud Detector")
+    st.title("TrueBill AI")
     
     with st.form("login_form"):
         st.write("Please enter your email to receive batch reports.")
