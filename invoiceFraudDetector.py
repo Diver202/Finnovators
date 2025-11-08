@@ -2,15 +2,17 @@ import streamlit as st
 import asyncio
 import io 
 from PIL import Image
+import re
 
 # Import all the functions from our utility files
 from aiUtils import parseInvoiceMultimodal
 from validationUtils import performDiscrepancyChecks
 from saveJaison import saveJaisonToFile
 from HSNSACValidate import validateHSNRates
-# --- 1. IMPORT NEW CSV MANAGER AND DELETE OLD 'saveToCSV' ---
 from csvUtils import save_to_clean_csv, save_to_flagged_csv
 from duplicationValidator import run_historical_checks 
+# --- 1. FIX 1: ADD THE MISSING IMPORT ---
+from notificationManager import send_email_report 
 
 # --- CUSTOM CSS (Unchanged) ---
 CUSTOM_CSS = """
@@ -27,37 +29,14 @@ CUSTOM_CSS = """
 </style>
 """
 
-# --- 2. Helper function to render the report (UPDATED) ---
+# --- render_report function (Unchanged) ---
 def render_report(file_name):
     
     report_data = st.session_state.processed_data[file_name]
     parsed_data = report_data["parsed_data"]
-    
-    # --- This is the new master list of all flags ---
     all_flags = report_data["all_flags"]
+    historical_findings = report_data["historical_findings"]
     
-    file_bytes = report_data["file_bytes"]
-    file_type = report_data["file_type"]
-
-    # Display the image
-    if file_type.startswith("image/"):
-        try:
-            if file_type != "image/tiff":
-                st.image(file_bytes, caption=f"Uploaded Image: {file_name}", use_column_width=True)
-            else:
-                with io.BytesIO(file_bytes) as f:
-                    img = Image.open(f)
-                    with io.BytesIO() as output:
-                        if getattr(img, "n_frames", 1) > 1: img.seek(0)
-                        img.save(output, format="PNG")
-                        st.image(
-                            output.getvalue(), 
-                            caption=f"Uploaded Image: {file_name} (Converted from TIFF)", 
-                            use_column_width=True
-                        )
-        except Exception as e:
-            st.error(f"Could not display image: {e}")
-
     st.divider()
     
     col1, col2 = st.columns(2)
@@ -74,7 +53,6 @@ def render_report(file_name):
     with col2:
         st.subheader("Final Validation Status")
         
-        # --- 3. RENDER THE FINAL STATUS ---
         if not all_flags:
             st.success("**Status: CLEAN**")
             st.markdown("- No flags found.")
@@ -86,15 +64,47 @@ def render_report(file_name):
             for reason in all_flags:
                 st.markdown(f"  - {reason}")
         
-        # --- Optionally show details of historical duplicates ---
-        historical_findings = report_data["historical_findings"]
         if historical_findings.get("near_duplicates"):
             with st.expander("View Duplicate Details"):
                 st.json(historical_findings["near_duplicates"])
 
 
-# --- Main App Function (UPDATED) ---
+# --- render_login_page function (Unchanged) ---
+def render_login_page():
+    st.set_page_config(
+        layout="centered", 
+        page_title="Invoice Detector Login",
+        page_icon=":shield:"
+    )
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+    st.title("Invoice Fraud Detector")
+    
+    with st.form("login_form"):
+        st.write("Please enter your email to receive batch reports.")
+        email = st.text_input("Your Email")
+        submitted = st.form_submit_button("Login")
+        
+        if submitted:
+            if re.match(r"[^@]+@[^@]+\.[^@]+", email):
+                st.session_state['logged_in'] = True
+                st.session_state['user_email'] = email
+                st.rerun()
+            else:
+                st.error("Please enter a valid email address.")
+
+# --- Main App Function (FIXED) ---
 async def main():
+    
+    if 'logged_in' not in st.session_state:
+        st.session_state['logged_in'] = False
+        st.session_state['user_email'] = ""
+    if 'processed_data' not in st.session_state:
+        st.session_state.processed_data = {}
+
+    if not st.session_state['logged_in']:
+        render_login_page()
+        return
+
     st.set_page_config(
         layout="wide", 
         page_title="Invoice Fraud Detector",
@@ -102,10 +112,29 @@ async def main():
         initial_sidebar_state="expanded"
     )
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-    st.title("Invoice Fraud & Discrepancy Detector")
 
-    if 'processed_data' not in st.session_state:
-        st.session_state.processed_data = {}
+    # --- Sidebar ---
+    with st.sidebar:
+        st.title("Processed Files")
+        st.write(f"Logged in as: `{st.session_state['user_email']}`")
+        if st.button("Logout"):
+            st.session_state['logged_in'] = False
+            st.session_state['user_email'] = ""
+            st.session_state['processed_data'] = {}
+            st.rerun()
+            
+        st.write("Select an invoice to view its detailed report.")
+        
+        file_names = list(st.session_state.processed_data.keys())
+        
+        selected_file = st.sidebar.radio(
+            "Invoices:",
+            file_names,
+            label_visibility="collapsed"
+        )
+    
+    # --- Main content area ---
+    st.title("Invoice Fraud & Discrepancy Detector")
 
     uploaded_files = st.file_uploader(
         "Drag and drop a folder or select multiple files",
@@ -118,105 +147,112 @@ async def main():
         if not uploaded_files:
             st.warning("Please upload files first.")
         else:
-            st.session_state.processed_data = {}
+            # Clear state *before* processing
+            st.session_state.processed_data.clear()
+            
             total_files = len(uploaded_files)
             progress_bar = st.progress(0, text=f"Starting batch process... 0/{total_files}")
             
-            temp_results = {}
+            flagged_files_for_email = []
 
             for i, file in enumerate(uploaded_files):
                 current_file_name = file.name
                 progress_text = f"Processing {current_file_name}... ({i + 1}/{total_files})"
                 progress_bar.progress((i + 1) / total_files, text=progress_text)
                 
-                # This list will store all error/warning messages
                 all_flags = []
+                parsed_data = {}
+                historical_findings = {} 
+                file_bytes = b""
+                file_type = "unknown"
                 
                 try:
                     file_bytes = file.getvalue()
                     file_type = file.type
                     
-                    # --- RUN THE FULL PIPELINE (UPDATED) ---
                     parsed_data = await parseInvoiceMultimodal(file_bytes, file_type)
                     
                     if not parsed_data or not (parsed_data.get("invoiceNumber") or parsed_data.get("gstNumber")):
                         all_flags.append("Failed to parse key data (Invoice # or GSTIN).")
-                        # Store minimal results
-                        temp_results[current_file_name] = {
-                            "parsed_data": parsed_data or {"error": "Parse failed"},
-                            "all_flags": all_flags,
-                            "historical_findings": {},
-                            "file_bytes": file_bytes,
-                            "file_type": file_type
-                        }
-                        # Save to flagged CSV and continue
-                        save_to_flagged_csv(parsed_data or {"file": current_file_name}, all_flags, "params_flagged.csv")
-                        saveJaisonToFile(parsed_data, current_file_name)
-                        st.session_state.processed_data = temp_results
-                        continue # Move to the next file
-
-                    # --- Step 2: Validation ---
-                    validation_findings = await performDiscrepancyChecks(parsed_data)
-                    for i in range(0, len(validation_findings), 2):
-                        if validation_findings[i] != st.success: # If it's st.error or st.warning
-                            all_flags.append(validation_findings[i+1])
-
-                    # --- Step 3: HSN Check ---
-                    hsn_findings = await validateHSNRates(parsed_data)
-                    for i in range(0, len(hsn_findings), 2):
-                        if hsn_findings[i] != st.success:
-                            all_flags.append(hsn_findings[i+1])
-
-                    # --- Step 4: Historical Check ---
-                    # It now ONLY reads from 'params_clean.csv'
-                    historical_findings = await asyncio.to_thread(
-                        run_historical_checks, parsed_data, "params_clean.csv" 
-                    )
+                        historical_findings = {"overall_flag": "PARSE_ERROR", "reasons": all_flags}
                     
-                    hist_flag = historical_findings.get("overall_flag")
-                    if hist_flag != "CLEAN":
-                        all_flags.extend(historical_findings.get("reasons", ["Historical check failed."]))
+                    else:
+                        validation_findings = await performDiscrepancyChecks(parsed_data)
+                        for j in range(0, len(validation_findings), 2):
+                            if validation_findings[j] != st.success: 
+                                all_flags.append(validation_findings[j+1])
+
+                        hsn_findings = await validateHSNRates(parsed_data)
+                        for j in range(0, len(hsn_findings), 2):
+                            if hsn_findings[j] != st.success:
+                                all_flags.append(hsn_findings[j+1])
+
+                        historical_findings = await asyncio.to_thread(
+                            run_historical_checks, parsed_data, "params_clean.csv" 
+                        )
+                        
+                        hist_flag = historical_findings.get("overall_flag")
+                        if hist_flag != "CLEAN":
+                            all_flags.extend(historical_findings.get("reasons", ["Historical check failed."]))
                     
-                    # --- 5. FINAL DECISION & SAVE ---
                     if not all_flags:
-                        # CLEAN
                         save_to_clean_csv(parsed_data, "params_clean.csv")
                     else:
-                        # FLAGGED
                         save_to_flagged_csv(parsed_data, all_flags, "params_flagged.csv")
+                        flagged_files_for_email.append({
+                            "file_name": current_file_name,
+                            "reasons": all_flags
+                        })
                     
-                    # Always save the JSON artifact
                     saveJaisonToFile(parsed_data, current_file_name)
                     
-                    # Store results for the UI
-                    temp_results[current_file_name] = {
+                    # We save results for *all* files, even error ones
+                    st.session_state.processed_data[current_file_name] = {
                         "parsed_data": parsed_data,
                         "all_flags": all_flags,
-                        "historical_findings": historical_findings, # For duplicate details
+                        "historical_findings": historical_findings,
                         "file_bytes": file_bytes,
                         "file_type": file_type
                     }
-                    st.session_state.processed_data = temp_results
 
                 except Exception as e:
                     st.error(f"Critical error on {current_file_name}: {e}. Skipping.")
+                    all_flags = [f"Critical error: {e}"]
+                    
+                    flagged_files_for_email.append({
+                        "file_name": current_file_name,
+                        "reasons": all_flags
+                    })
+                    
+                    st.session_state.processed_data[current_file_name] = {
+                        "parsed_data": {"error": str(e)},
+                        "all_flags": all_flags,
+                        "historical_findings": {"overall_flag": "CRITICAL_ERROR", "reasons": all_flags},
+                        "file_bytes": file_bytes, # Use the bytes we have
+                        "file_type": file_type # Use the type we have
+                    }
             
+            # --- End of loop ---
             progress_bar.empty()
             st.success(f"Batch processing complete! Processed {len(st.session_state.processed_data)} files.")
+            
+            if flagged_files_for_email:
+                with st.spinner("Sending email report..."):
+                    await asyncio.to_thread(
+                        send_email_report,
+                        st.session_state['user_email'],
+                        flagged_files_for_email
+                    )
+            else:
+                st.success("No flagged files found in this batch!")
+            
+            # --- 2. FIX 2: ADD THE RERUN CALL ---
+            # This forces Streamlit to reload the script,
+            # which makes the sidebar see the new session_state.
+            st.rerun()
 
-    # --- Sidebar and Main Content Area (Unchanged) ---
+    # --- Main Content Area (Report Display) ---
     if st.session_state.processed_data:
-        st.sidebar.title("Processed Files")
-        st.sidebar.write("Select an invoice to view its detailed report.")
-        
-        file_names = list(st.session_state.processed_data.keys())
-        
-        selected_file = st.sidebar.radio(
-            "Invoices:",
-            file_names,
-            label_visibility="collapsed"
-        )
-        
         if selected_file:
             render_report(selected_file)
     else:
