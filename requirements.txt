@@ -1,0 +1,7 @@
+streamlit
+httpx
+PyMuPDF
+Pillow
+pandas
+numpy
+scikit-learn
